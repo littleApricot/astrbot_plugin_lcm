@@ -77,7 +77,12 @@ def test_old_duplicate_option_is_removed_from_saved_config(tmp_path):
     path.write_text(json.dumps({"base_tokens": 50000, "output_reserve_tokens": 4096}))
     config = AstrBotConfig(str(path), schema=schema)
     with patch("astrbot_plugin_lcm.main.StarTools.get_data_dir", return_value=tmp_path):
-        LCM(SimpleNamespace(register_web_api=lambda *a: None), config)
+        LCM(
+            SimpleNamespace(
+                register_web_api=lambda *a: None, add_llm_tools=lambda *a: None
+            ),
+            config,
+        )
     saved = json.loads(path.read_text(encoding="utf-8-sig"))
     assert (
         "output_reserve_tokens" not in saved and "output_reserve_tokens" not in config

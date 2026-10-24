@@ -11,6 +11,7 @@ from astrbot.core.agent.hooks import BaseAgentRunHooks
 from astrbot.core.agent.message import Message, TextPart
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
+from astrbot.core.agent.tool import ToolSet
 from astrbot.core.agent.tool_executor import BaseFunctionToolExecutor
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 
@@ -144,6 +145,7 @@ async def prepare(owner, text="current", base=None):
         contexts=base or [],
         system_prompt="当前人格和长期记忆",
         conversation=SimpleNamespace(cid="conv", token_usage=0),
+        func_tool=ToolSet(owner.history_tools()),
     )
     await owner.prepare(ev, req)
     req.extra_user_content_parts.append(
@@ -194,9 +196,9 @@ async def test_actual_runner_keeps_full_base_and_captures_provider_snapshot(owne
         assert "当前人格和长期记忆" in text and "独立记忆提示" in text
         assert "duplicate" not in text
         assert [t["name"] for t in snap["payload"]["tools"]] == [
-            "lcm_search",
             "lcm_describe",
             "lcm_expand",
+            "lcm_search",
         ]
         ev.cleanup_temporary_local_files()
         assert owner.store.runs(owner.scope)[0]["status"] == "complete"

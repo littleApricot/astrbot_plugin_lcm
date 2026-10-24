@@ -22,6 +22,7 @@ with patch(
     plugin = LCM(
         SimpleNamespace(
             register_web_api=lambda *a: None,
+            add_llm_tools=lambda *a: None,
             get_config=lambda **k: {"timezone": "Asia/Shanghai"},
         ),
         {"base_tokens": 40},

@@ -20,7 +20,10 @@ async def test_read_routes_media_and_cross_session_rejection(tmp_path):
     registered = []
     with patch("astrbot_plugin_lcm.main.StarTools.get_data_dir", return_value=tmp_path):
         obj = LCM(
-            SimpleNamespace(register_web_api=lambda *a: registered.append(a)),
+            SimpleNamespace(
+                register_web_api=lambda *a: registered.append(a),
+                add_llm_tools=lambda *a: None,
+            ),
             {"base_tokens": 40000},
         )
     a = obj.store.scope("groupA", "c")

@@ -8,6 +8,7 @@ import inspect
 from types import MethodType
 
 from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
+from astrbot.core.agent.tool import ToolSet
 
 from .image_context import ImageContext
 from .model_time import model_times
@@ -38,13 +39,10 @@ class ProviderView:
         tools = kwargs.get("func_tool")
         schemas = (
             [
-                {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                }
-                for t in tools.tools
-                if t.active
+                item["function"]
+                for item in ToolSet(
+                    [tool for tool in tools.tools if tool.active]
+                ).openai_schema()
             ]
             if tools
             else []

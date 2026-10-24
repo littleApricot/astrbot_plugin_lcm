@@ -60,11 +60,35 @@ class HistoryTool(FunctionTool):
                 "properties": properties,
                 "required": required,
             },
+            handler_module_path=__name__,
         )
         # Pydantic dataclass fields do not permit undeclared attributes via init.
         self.owner, self.scope = owner, scope
 
     async def call(self, context, **kwargs):
+        if self.scope is None:
+            # Registered definitions hold no session state. Resolve it per call.
+            event = getattr(getattr(context, "context", None), "event", None)
+            state = event.get_extra("lcm_prepared") if event is not None else None
+            if (
+                getattr(self.owner, "_terminated", False)
+                or not isinstance(state, dict)
+                or state.get("owner") is not self.owner
+                or not state.get("scope")
+                or state.get("origin") != event.unified_msg_origin
+                or self.owner.store.scope_origin(state["scope"])
+                != event.unified_msg_origin
+            ):
+                return encode({"ok": False, "error": "lcm_context_unavailable"})
+            bound = HistoryTool(
+                self.owner,
+                state["scope"],
+                self.name,
+                self.description,
+                self.parameters["properties"],
+                self.parameters["required"],
+            )
+            return await bound.call(context, **kwargs)
         try:
             if self.name == "lcm_search":
                 query = kwargs.pop("query")
@@ -210,6 +234,12 @@ class LCM(Star):
         self.history_bridge = None
         self.media_tasks = set()
         self.scope_locks = {}
+        self._terminated = False
+        self._history_tools = (
+            self.history_tools() if self.config.get("enabled", True) else ()
+        )
+        if self._history_tools:
+            self.context.add_llm_tools(*self._history_tools)
         for endpoint in (
             "sessions",
             "context",
@@ -228,6 +258,50 @@ class LCM(Star):
                 ["GET"],
                 "LCM context and history",
             )
+
+    def history_tools(self):
+        """Declare session-resolving tools for AstrBot's shared registry."""
+        text = {"type": "string"}
+        cursor = {"cursor": text}
+        return (
+            HistoryTool(
+                self,
+                None,
+                "lcm_search",
+                "需要原话、时间或不确定细节时，按字面关键词搜索本会话聊天和摘要，可按发送者和时间范围筛选。时间格式 YYYY-MM-DD HH:mm:ss。取得 id 后用 lcm_expand 读取完整内容。",
+                {
+                    "query": text,
+                    "target": {"type": "string", "enum": ["raw", "summaries", "both"]},
+                    "sender": text,
+                    "start_time": text,
+                    "end_time": text,
+                    **cursor,
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                },
+                ["query"],
+            ),
+            HistoryTool(
+                self,
+                None,
+                "lcm_describe",
+                "查看当前历史目录或指定摘要的直接来源。摘要是历史资料，表达方式遵循当前人设；需要核对细节时根据来源 id 调用 lcm_expand。",
+                {"id": text, **cursor},
+                [],
+            ),
+            HistoryTool(
+                self,
+                None,
+                "lcm_expand",
+                "用消息或摘要 id 读取原文，target=original 查看完整原始轮次。要看历史原图，先取得媒体 id，再用该 id 调用本工具。",
+                {
+                    "id": text,
+                    "target": {"type": "string", "enum": ["children", "original"]},
+                    **cursor,
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                },
+                ["id"],
+            ),
+        )
 
     async def initialize(self):
         if self.config.get("enabled", True):
@@ -421,48 +495,6 @@ class LCM(Star):
         req.func_tool.tools = [
             t for t in req.func_tool.tools if t.name != "get_group_message_history"
         ]
-        text = {"type": "string"}
-        cursor = {"cursor": text}
-        for tool in (
-            HistoryTool(
-                self,
-                scope,
-                "lcm_search",
-                "需要原话、时间或不确定细节时，按字面关键词搜索本会话聊天和摘要，可按发送者和时间范围筛选。时间格式 YYYY-MM-DD HH:mm:ss。取得 id 后用 lcm_expand 读取完整内容。",
-                {
-                    "query": text,
-                    "target": {"type": "string", "enum": ["raw", "summaries", "both"]},
-                    "sender": text,
-                    "start_time": text,
-                    "end_time": text,
-                    **cursor,
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 50},
-                },
-                ["query"],
-            ),
-            HistoryTool(
-                self,
-                scope,
-                "lcm_describe",
-                "查看当前历史目录或指定摘要的直接来源。摘要是历史资料，表达方式遵循当前人设；需要核对细节时根据来源 id 调用 lcm_expand。",
-                {"id": text, **cursor},
-                [],
-            ),
-            HistoryTool(
-                self,
-                scope,
-                "lcm_expand",
-                "用消息或摘要 id 读取原文，target=original 查看完整原始轮次。要看历史原图，先取得媒体 id，再用该 id 调用本工具。",
-                {
-                    "id": text,
-                    "target": {"type": "string", "enum": ["children", "original"]},
-                    **cursor,
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 10},
-                },
-                ["id"],
-            ),
-        ):
-            req.func_tool.add_tool(tool)
 
     @filter.on_llm_request(priority=-maxsize + 1)
     async def remove_duplicate_context(self, event: AstrMessageEvent, req):
@@ -756,6 +788,17 @@ class LCM(Star):
             return error_response(str(exc), status_code=400)
 
     async def terminate(self):
+        self._terminated = True
+        registered = getattr(self, "_history_tools", ())
+        if registered:
+            for tool in registered:
+                tool.active = False
+            manager = self.context.get_llm_tool_manager()
+            manager.func_list[:] = [
+                tool
+                for tool in manager.func_list
+                if not any(tool is owned for owned in registered)
+            ]
         if self.worker:
             self.worker.cancel()
             await asyncio.gather(self.worker, return_exceptions=True)
