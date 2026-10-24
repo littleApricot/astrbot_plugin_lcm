@@ -199,9 +199,7 @@ class HistoryBridge:
                 except Exception:
                     # The native commit succeeded. Repair from the DB before the
                     # next request rather than reporting a misleading save failure.
-                    logger.exception(
-                        "LCM history reconciliation failed; next request will retry"
-                    )
+                    logger.exception("LCM 历史同步失败，下次请求前将重试")
                     if state:
                         state["history_sync_failed"] = True
                 return result
@@ -259,9 +257,8 @@ class HistoryBridge:
             ids = list(
                 dict.fromkeys(ids + state["inputs"] + state.get("output_ids", []))
             )
-        nodes = self.owner.store.history_nodes(
-            self.owner.store.node(scope, ident) for ident in ids
-        )
+        project = getattr(self.owner, "model_nodes", self.owner.store.history_nodes)
+        nodes = project(self.owner.store.node(scope, ident) for ident in ids)
         # Projection must see the whole tool block, just as the request does.
         # A single-node projection would classify every tool as incomplete.
         for node, message in zip(nodes, self.owner.messages(nodes)):
@@ -409,7 +406,9 @@ class HistoryBridge:
         if not state or state.get("owner") is not self.owner:
             return
         await self.refresh(state["origin"], state["cid"], event)
-        base = self.owner.store.view(state["scope"], exclude=state["inputs"])
+        base = getattr(self.owner, "view", self.owner.store.view)(
+            state["scope"], exclude=state["inputs"]
+        )
         state["base"] = base
         req.contexts = self.owner.messages(base["nodes"])
         batch = event.get_extra("reply_gate_batch")
@@ -423,7 +422,9 @@ class HistoryBridge:
         old = runner.run_context.messages
         tail = old[state["offset"] :]
         excluded = [*state["inputs"], *state["output_ids"]]
-        base = self.owner.store.view(state["scope"], exclude=excluded)
+        base = getattr(self.owner, "view", self.owner.store.view)(
+            state["scope"], exclude=excluded
+        )
         systems = old[:1] if old and old[0].role == "system" else []
         inputs = [value for _, value in reversed(state["input_messages"])]
         prefix = (

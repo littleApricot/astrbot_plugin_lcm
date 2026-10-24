@@ -60,7 +60,8 @@ class ImageContext:
 
     async def history(self, messages, keep, nodes=(), *, token_budget=None, model=""):
         """Limit only the supplied history; callers keep current input separate."""
-        ordered = self.owner.store.history_nodes(nodes)
+        project = getattr(self.owner, "model_nodes", self.owner.store.history_nodes)
+        ordered = project(nodes)
         values = [
             copy.deepcopy(message)
             if isinstance(message, dict)

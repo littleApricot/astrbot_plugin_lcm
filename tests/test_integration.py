@@ -179,7 +179,9 @@ async def test_actual_runner_keeps_full_base_and_captures_provider_snapshot(owne
         loop = await runner(owner, ev, req, provider)
         async for _ in loop.step():
             pass
-        assert len(provider.calls[0]["contexts"]) == 8  # persona + six old + new
+        assert (
+            len(provider.calls[0]["contexts"]) == 9
+        )  # system + six old + new + temporary
         assert "旧消息0" in json.dumps(
             [m.model_dump() for m in provider.calls[0]["contexts"]], ensure_ascii=False
         )
@@ -365,7 +367,8 @@ async def test_summary_worker_publishes_complete_provider_result(owner, raw):
             for n in view["nodes"]
         )
         assert len(provider.calls) == 1
-        assert "来源节点" in provider.calls[0]["prompt"]
+        assert "来源节点" not in provider.calls[0]["prompt"]
+        assert "必要时间" in provider.calls[0]["prompt"]
         assert len(owner.store.history(owner.scope)["records"]) == 4
     finally:
         task.cancel()

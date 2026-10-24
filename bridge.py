@@ -77,6 +77,9 @@ class ProviderView:
             raise ValueError(
                 "LCM context exceeds configured model input budget; originals retained, waiting for background compaction"
             )
+        event = self._state.get("event")
+        if event is not None:
+            data["context_sources"] = self._owner.context_rules().manifest(event)
         self._owner.store.snapshot(self._state["scope"], self._state["run"], data)
 
     async def text_chat(self, **kwargs):
@@ -114,7 +117,39 @@ class ProviderView:
             token_budget=budget,
             model=kwargs.get("model") or self._provider.get_model(),
         )
-        return {**kwargs, "contexts": projected + contexts[end:]}, projection.stats
+        values = projected + list(contexts[end:])
+        event = self._state.get("event")
+        if event is not None:
+            from astrbot.core.agent.message import Message
+
+            rules = self._owner.context_rules()
+            if values and plain(values[0]).get("role") == "system":
+                value = plain(values[0])
+                content = value.get("content", "")
+                text = (
+                    content
+                    if isinstance(content, str)
+                    else "\n".join(
+                        part.get("text", "")
+                        for part in content
+                        if isinstance(part, dict)
+                    )
+                )
+                value["content"] = rules.system(event, text)
+                values[0] = (
+                    value
+                    if isinstance(values[0], dict)
+                    else type(values[0]).model_validate(value)
+                )
+            # Detached input only: this message never enters runner history or
+            # native persistence. The request snapshot still records it.
+            temporary = {"role": "user", "content": rules.temporary(event)}
+            values.append(
+                temporary
+                if not values or isinstance(values[0], dict)
+                else Message.model_validate(temporary)
+            )
+        return {**kwargs, "contexts": values}, projection.stats
 
 
 class UnchangedContext:
@@ -159,6 +194,7 @@ class RunnerBridge:
             state["offset"] = len(runner.run_context.messages)
             state["outputs"] = 0
             state["runner"] = runner
+            state["event"] = event
             history = getattr(owner, "history_bridge", None)
             if history:
                 await history.register(event, state)

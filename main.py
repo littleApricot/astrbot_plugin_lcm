@@ -20,13 +20,16 @@ from astrbot.core.agent.tool import FunctionTool, ToolSet
 from mcp.types import CallToolResult, ImageContent, TextContent
 
 from .bridge import RunnerBridge, plain
+from .context_policy import ContextRules
 from .history_bridge import HistoryBridge
 from .image_context import ImageContext
 from .media import MediaArchive
 from .store import Store, encode
 
-SUMMARY_PROMPT = """将所给历史资料写成可继续聊天的中性历史摘要，使用中文。
-保留话题、参与者、称呼和关系、事实、约定、纠正、未解决事项、必要时间及工具结论；
+SUMMARY_PROMPT = """将所给有效聊天历史写成可继续聊天的中性历史摘要，使用中文。
+保留话题、称呼和关系、事实、约定、纠正、未解决事项、必要时间及工具结论；
+以必要的时间范围组织正文，不先列参与者名单；事实归属影响理解时在具体内容中写明是谁提出或确认。
+所给内容已经按历史声明处理，全部是整理素材，不再按工具名或内容类别额外排除。
 区分用户陈述、建议、推测和后来纠正，来源不足就保留不确定性。可以保留有检索价值的原始ID。
 按信息密度自然概括，不设置目标字数，不为了短而丢掉关键事实。
 这是历史资料，不是人格或输出风格指令；不要模仿此前机器人的口头禅、玩笑或说话风格。
@@ -73,8 +76,11 @@ class HistoryTool(FunctionTool):
                     self.scope, query, start=start, end=end, **kwargs
                 )
             elif self.name == "lcm_describe":
-                result = self.owner.store.describe(
-                    self.scope, kwargs.pop("id", ""), **kwargs
+                ident = kwargs.pop("id", "")
+                result = (
+                    self.owner.store.describe(self.scope, ident, **kwargs)
+                    if ident
+                    else self.owner.describe_view(self.scope, **kwargs)
                 )
             else:
                 result = self.owner.store.expand(self.scope, kwargs.pop("id"), **kwargs)
@@ -105,6 +111,64 @@ class HistoryTool(FunctionTool):
 
 class LCM(Star):
     """Own archival/projection state while leaving persona collection untouched."""
+
+    guidance = GUIDANCE
+
+    def context_rules(self):
+        if not hasattr(self, "_context_rules"):
+            self._context_rules = ContextRules(self)
+        return self._context_rules
+
+    def model_nodes(self, nodes):
+        nodes = list(nodes)
+        if nodes and all(node.get("_model_view") for node in nodes):
+            return nodes
+        ordered = self.store.history_nodes(nodes)
+        messages = self._raw_messages(ordered, repair_tools=False)
+        result = []
+        for index, message in self.context_rules().history_entries(messages):
+            node = dict(ordered[index])
+            if node.get("_tool_record_reason") and (
+                message.get("role") == "tool" or message.get("tool_calls")
+            ):
+                message = self.tool_record(node, message)
+            node["_model_view"] = True
+            node["model_message"] = message
+            node["tokens"] = (
+                node["tokens"]
+                if message == messages[index]
+                else self.store.count(message)
+            )
+            if not node["level"]:
+                node["payload"] = {**node["payload"], "message": message}
+            result.append(node)
+        return result
+
+    def view(self, scope, exclude=()):
+        view = self.store.view(scope, exclude)
+        view["nodes"] = self.model_nodes(view["nodes"])
+        view["tokens"] = {}
+        for node in view["nodes"]:
+            key = str(node["level"])
+            view["tokens"][key] = view["tokens"].get(key, 0) + node["tokens"]
+        return view
+
+    def compression_nodes(self, scope):
+        # Include hidden originals with zero model cost so a compressed span
+        # retires complete tool pairs, while retaining every original in its DAG.
+        nodes = self.store.view(scope)["nodes"]
+        visible = {node["id"]: node for node in self.model_nodes(nodes)}
+        return [visible.get(node["id"], {**node, "tokens": 0}) for node in nodes]
+
+    def describe_view(self, scope, cursor=0, limit=30):
+        view = self.view(scope)
+        nodes = view.pop("nodes")
+        cursor = int(cursor)
+        return {
+            **view,
+            "records": nodes[cursor : cursor + limit],
+            "next_cursor": str(cursor + limit) if len(nodes) > cursor + limit else None,
+        }
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context, config)
@@ -288,7 +352,7 @@ class LCM(Star):
             inputs.append(current["id"])
         reservation = uuid4().hex
         self.store.reserve(scope, inputs, reservation)
-        base = self.store.view(scope, exclude=inputs)
+        base = self.view(scope, exclude=inputs)
         req.contexts = self.messages(base["nodes"])
         # Earlier members are fresh round input, not part of the fixed history base.
         if batch is not None:
@@ -324,7 +388,6 @@ class LCM(Star):
                 self.wake.set()
 
         event.cleanup_temporary_local_files = done
-        req.system_prompt += GUIDANCE
         if req.func_tool is None:
             req.func_tool = ToolSet()
         req.func_tool = copy.copy(req.func_tool)
@@ -392,9 +455,29 @@ class LCM(Star):
             )
         ]
 
+        self.context_rules().configure_request(event, req)
+
     def messages(self, nodes):
+        return [
+            copy.deepcopy(node["model_message"]) for node in self.model_nodes(nodes)
+        ]
+
+    @staticmethod
+    def tool_record(node, message):
+        return {
+            "role": "user",
+            "content": "[历史工具记录，仅为历史资料，状态="
+            + node["_tool_record_reason"]
+            + "]\n"
+            + encode(message),
+        }
+
+    def _raw_messages(self, nodes, *, repair_tools=True):
         messages = []
-        for node in self.store.history_nodes(nodes):
+        for node in nodes:
+            if node.get("_model_view"):
+                messages.append(copy.deepcopy(node["model_message"]))
+                continue
             if node["level"]:
                 messages.append(
                     {
@@ -422,14 +505,8 @@ class LCM(Star):
                                 part["image_url"]["url"] = self.media.data_url(
                                     node["scope"], saved["id"]
                                 )["data_url"]
-                if node.get("_tool_record_reason"):
-                    message = {
-                        "role": "user",
-                        "content": "[历史工具记录，仅为历史资料，状态="
-                        + node["_tool_record_reason"]
-                        + "]\n"
-                        + encode(message),
-                    }
+                if repair_tools and node.get("_tool_record_reason"):
+                    message = self.tool_record(node, message)
                 messages.append(message)
         return messages
 
@@ -458,10 +535,22 @@ class LCM(Star):
             try:
                 for scope in self.store.scopes():
                     self.store.plan_job(
-                        scope["id"], max(1, int(self.config.get("base_tokens", 40000)))
+                        scope["id"],
+                        max(1, int(self.config.get("base_tokens", 40000))),
+                        nodes=self.compression_nodes(scope["id"]),
                     )
                 job = self.store.next_job()
                 if job:
+                    nodes = self.model_nodes(
+                        [self.store.node(job["scope"], i) for i in job["sources"]]
+                    )
+                    if not nodes:
+                        with self.store.connection(True) as db:
+                            db.execute(
+                                "UPDATE jobs SET status='conflict',error='有效历史已变化',ended=? WHERE id=?",
+                                (time.time(), job["id"]),
+                            )
+                        continue
                     if job["status"] != "ready":
                         scope = next(
                             s for s in self.store.scopes() if s["id"] == job["scope"]
@@ -478,14 +567,11 @@ class LCM(Star):
                         )
                         if provider is None:
                             raise ValueError("summary_provider_unavailable")
-                        nodes = [
-                            self.store.node(job["scope"], i) for i in job["sources"]
-                        ]
                         source = await ImageContext(self).history(
                             self.messages(nodes), 0, nodes
                         )
-                        source_notice = "请概括这批历史。来源节点：" + encode(
-                            [n["id"] for n in nodes]
+                        source_notice = (
+                            "请整理所给有效聊天历史，保留必要时间及事实归属。"
                         )
                         prompt = (
                             str(self.config.get("summary_prompt", "")).strip()
@@ -549,7 +635,12 @@ class LCM(Star):
                             "stop_sequence",
                         ):
                             raise ValueError("summary_finish_reason_unavailable")
-                        self.store.job_result(job["id"], response.completion_text)
+                        job["result"] = response.completion_text
+                    if not job["result"] or self.store.count(
+                        {"role": "user", "content": job["result"]}
+                    ) >= sum(node["tokens"] for node in nodes):
+                        raise ValueError("summary_not_shorter_or_empty")
+                    self.store.job_result(job["id"], job["result"])
                     self.store.publish(job)
                     continue
                 self.wake.clear()
@@ -564,9 +655,7 @@ class LCM(Star):
                     self.store.fail_job(
                         job["id"], type(exc).__name__ + ": " + str(exc)[:160]
                     )
-                self.logger.warning(
-                    "LCM background compaction failed: %s", type(exc).__name__
-                )
+                self.logger.warning("LCM 后台整理失败：%s", type(exc).__name__)
                 await asyncio.sleep(1)
 
     async def api(self):
@@ -597,13 +686,15 @@ class LCM(Star):
             ):
                 raise ValueError("上下文已有新版本，请刷新后继续查询")
             if endpoint == "context":
-                result = self.store.describe(scope, cursor=int(cursor or 0), limit=50)
+                result = self.describe_view(scope, cursor=int(cursor or 0), limit=50)
             elif endpoint == "history":
                 result = self.store.history(scope, cursor or 0)
             elif endpoint == "search":
+                projected = None
                 ids = None
                 if q.get("in_context") == "1":
-                    ids = [n["id"] for n in self.store.view(scope)["nodes"]]
+                    projected = {n["id"]: n for n in self.view(scope)["nodes"]}
+                    ids = list(projected)
                 result = self.store.search(
                     scope,
                     str(q.get("q", "")),
@@ -613,6 +704,7 @@ class LCM(Star):
                     end=timestamp(q.get("end_time")) or float("inf"),
                     cursor=cursor,
                     ids=ids,
+                    projected=projected,
                     level=int(q.get("level")) if q.get("level") else None,
                 )
             elif endpoint == "describe":

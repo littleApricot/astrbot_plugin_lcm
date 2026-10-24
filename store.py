@@ -1014,6 +1014,7 @@ class Store:
         limit=20,
         ids=None,
         level=None,
+        projected=None,
     ):
         query = query.strip()
         if (
@@ -1039,7 +1040,13 @@ class Store:
             )
             hits = []
             for row in rows:
-                n = self.node(scope, row[0], db)
+                n = (
+                    projected.get(row[0])
+                    if projected is not None
+                    else self.node(scope, row[0], db)
+                )
+                if n is None:
+                    continue
                 if ids is not None and n["id"] not in ids:
                     continue
                 if level is not None and n["level"] != level:
@@ -1182,10 +1189,12 @@ class Store:
                 "UPDATE media SET status='missing',error='process_restarted_during_capture' WHERE status='pending'"
             )
 
-    def plan_job(self, scope, budget):
+    def plan_job(self, scope, budget, *, nodes=None):
         with self.connection(True) as db:
             view = {
-                "nodes": [
+                "nodes": sorted(nodes, key=lambda n: (n["lo"], n["seq"]))
+                if nodes is not None
+                else [
                     self.node(scope, item[0], db)
                     for item in db.execute(
                         "SELECT id FROM nodes WHERE scope=? AND active=1 ORDER BY lo,seq",
