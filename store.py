@@ -142,6 +142,15 @@ class Store:
             )
         return key
 
+    def scope_origin(self, scope):
+        with self.connection() as db:
+            row = db.execute(
+                "SELECT origin FROM scopes WHERE id=?", (scope,)
+            ).fetchone()
+        if row is None:
+            raise ValueError("session_not_found")
+        return row[0]
+
     def scopes(self):
         with self.connection() as db:
             return [
@@ -581,6 +590,12 @@ class Store:
                     stamp = (
                         source_nodes[0]["timestamp"] if source_nodes else time.time()
                     )
+                    extra = {"native_history_revision": True}
+                    if source_nodes and all(
+                        source["payload"].get("extra", {}).get("time_unknown")
+                        for source in source_nodes
+                    ):
+                        extra["time_unknown"] = True
                     cur = db.execute(
                         """INSERT INTO nodes(id,scope,level,kind,payload,children,tokens,lo,hi,
                         round_id,sender,timestamp,received) VALUES(?,?,0,'revision',?,?,?,?,?,?,?,?,?)""",
@@ -590,7 +605,7 @@ class Store:
                             encode(
                                 {
                                     "message": message,
-                                    "extra": {"native_history_revision": True},
+                                    "extra": extra,
                                 }
                             ),
                             encode(sources),

@@ -10,6 +10,7 @@ from types import MethodType
 from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
 
 from .image_context import ImageContext
+from .model_time import model_times
 
 
 def plain(value):
@@ -149,6 +150,13 @@ class ProviderView:
                 if not values or isinstance(values[0], dict)
                 else Message.model_validate(temporary)
             )
+        zone = self._owner.time_zone(self._state["scope"])
+        values = [
+            model_times(value, zone)
+            if isinstance(value, dict)
+            else type(value).model_validate(model_times(plain(value), zone))
+            for value in values
+        ]
         return {**kwargs, "contexts": values}, projection.stats
 
 

@@ -30,6 +30,7 @@ owner = test_integration.owner
 OLD_CLOCK = (
     "<system_reminder>Current datetime: 2026-10-24T01:00+08:00</system_reminder>"
 )
+LOCAL_CLOCK = "<system_reminder>Current datetime: 2026-10-24 01:00:00</system_reminder>"
 
 
 def install_gallery(owner, tmp_path):
@@ -128,20 +129,21 @@ async def test_native_turn_keeps_private_tools_but_only_detaches_temporary_input
         assert "来源：astrbot_plugin_meme_library" in sent
         assert "never return an empty response" not in sent
         assert "不可用技能目录" not in sent
-        assert OLD_CLOCK in sent
-        assert "时区：Asia/Shanghai" in sent
+        assert LOCAL_CLOCK in sent
+        assert "Asia/Shanghai" not in sent and "+08:00" not in sent
+        assert "User ID:" not in sent
         await native_save(manager, ev, req, loop)
         native = json.dumps(manager.history, ensure_ascii=False)
         assert PRIVATE in native  # Original execution is retained.
         assert "本轮图库提示" not in native and "时区：Asia/Shanghai" not in native
         assert "2026-10-25T02:00+08:00" not in native
-        assert OLD_CLOCK in native
+        assert LOCAL_CLOCK in native
         _, next_req = await prepare(owner, "下一条")
         effective = json.dumps(next_req.contexts, ensure_ascii=False)
         assert PRIVATE not in effective and "正常文字回复" in effective
-        assert OLD_CLOCK in effective
+        assert LOCAL_CLOCK in effective
         judged, _ = await build_input(owner.context, ev, next_req)
-        assert PRIVATE not in str(judged) and OLD_CLOCK in str(judged)
+        assert PRIVATE not in str(judged) and LOCAL_CLOCK in str(judged)
         snapshot = owner.store.requests(owner.scope, ev.get_extra("lcm_run"))[0]
         captured = owner.store.request(owner.scope, snapshot["id"])["payload"]
         assert captured["context_sources"]["temporary"]
@@ -228,7 +230,7 @@ def test_compaction_uses_effective_text_and_retires_hidden_sources(owner, tmp_pa
         material = owner.messages(
             [owner.store.node(owner.scope, i) for i in job["sources"]]
         )
-        assert PRIVATE not in str(material) and OLD_CLOCK in str(material)
+        assert PRIVATE not in str(material) and LOCAL_CLOCK in str(material)
         owner.store.job_result(ident, "旧消息、描述修改和发图事实。")
         assert owner.store.publish(job)
         assert PRIVATE not in str(owner.messages(owner.view(owner.scope)["nodes"]))

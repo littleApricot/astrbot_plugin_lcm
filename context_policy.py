@@ -105,9 +105,8 @@ class ContextRules:
         return [message for _, message in self.history_entries(messages)]
 
     def configure_request(self, event, req):
-        # Move only newly assembled runtime parts. Old historical reminders and
-        # timestamps are never scanned, removed or rewritten by this operation.
-        moved, kept = [], []
+        # Replace native identity/clock reminders with the minimal runtime block.
+        kept = []
         for part in req.extra_user_content_parts or []:
             value = part if isinstance(part, dict) else part.model_dump()
             text = value.get("text", "")
@@ -122,15 +121,9 @@ class ContextRules:
                     line.startswith(("User ID:", "Group name:", "Current datetime:"))
                     for line in lines
                 ):
-                    moved.extend(
-                        line
-                        for line in lines
-                        if not line.startswith("Current datetime:")
-                    )
                     continue
             kept.append(part)
         req.extra_user_content_parts = kept
-        event.set_extra("lcm_runtime_identity", "\n".join(moved))
         req.system_prompt = self.system(event, req.system_prompt or "")
         if req.func_tool is not None:
             req.func_tool = copy.copy(req.func_tool)
@@ -156,7 +149,6 @@ class ContextRules:
             value = value(event) if callable(value) else value
             if value and value.strip():
                 records.append((declaration["owner"], value))
-        records.append(("astrbot_plugin_lcm", self.owner.guidance))
         rendered = "\n\n".join(wrap(owner, text) for owner, text in records)
         event.set_extra("lcm_rendered_system", rendered)
         event.set_extra(
@@ -171,15 +163,7 @@ class ContextRules:
         )
         zone = ZoneInfo(config.get("timezone", "Asia/Shanghai") or "Asia/Shanghai")
         current = datetime.now(zone)
-        runtime = (
-            "当前时间："
-            + current.isoformat(timespec="seconds")
-            + "；时区："
-            + str(zone)
-        )
-        identity = event.get_extra("lcm_runtime_identity", "")
-        if identity:
-            runtime += "\n" + identity
+        runtime = "当前时间：" + current.strftime("%Y-%m-%d %H:%M:%S")
         records = [("astrbot.runtime", runtime)]
         for declaration in self.declarations():
             value = declaration.get("temporary", "")

@@ -176,6 +176,12 @@ class HistoryBridge:
                     event,
                     state if internal else None,
                 )
+                prepare = getattr(owner, "saved_history", None)
+                if callable(prepare):
+                    bound.arguments["history"], aliases = prepare(
+                        scope, bound.arguments["history"], options["candidates"]
+                    )
+                    options["candidates"].extend(aliases)
                 if internal:
                     owner.store.stage_history(
                         state["run"], scope, {"before": before, "options": options}
@@ -258,12 +264,19 @@ class HistoryBridge:
                 dict.fromkeys(ids + state["inputs"] + state.get("output_ids", []))
             )
         project = getattr(self.owner, "model_nodes", self.owner.store.history_nodes)
-        nodes = project(self.owner.store.node(scope, ident) for ident in ids)
+        originals = [self.owner.store.node(scope, ident) for ident in ids]
+        raw_messages = {
+            node["id"]: node["payload"].get("message") for node in originals
+        }
+        nodes = project(originals)
         # Projection must see the whole tool block, just as the request does.
         # A single-node projection would classify every tool as incomplete.
         for node, message in zip(nodes, self.owner.messages(nodes)):
             ident = node["id"]
             result.append({"id": ident, "message": message})
+            if node["level"] == 0:
+                raw = raw_messages[ident]
+                result.append({"id": ident, "message": raw})
             if node["level"] == 0 and node["payload"].get("extra", {}).get(
                 "platform_id"
             ):
