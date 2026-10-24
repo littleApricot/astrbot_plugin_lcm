@@ -8,8 +8,10 @@ import pytest
 from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
 from openai import AsyncOpenAI, BadRequestError
 
+from astrbot_plugin_lcm.history_bridge import HistoryBridge
 from astrbot_plugin_lcm.history_model import ordered_history_nodes
 from astrbot_plugin_lcm.tests import test_integration
+from astrbot_plugin_lcm.tests.test_effective_pipeline import MemoryConversationManager
 
 owner = test_integration.owner
 
@@ -211,3 +213,52 @@ def test_incomplete_and_failed_tools_remain_readable_historical_data(owner):
         json.loads(msg["content"].split("\n", 1)[1]) == node["payload"]["message"]
         for msg, node in zip(messages, nodes)
     )
+
+
+def test_history_sync_matches_projected_tool_images_to_original_ids(owner):
+    import base64
+    from types import SimpleNamespace
+
+    from astrbot_plugin_lcm.tests.test_image_context import PNG
+
+    original = "https://archive.invalid/tool.png"
+    messages = [
+        call("image-call"),
+        {
+            "role": "tool",
+            "tool_call_id": "image-call",
+            "content": [{"type": "image_url", "image_url": {"url": original}}],
+        },
+    ]
+    ids = [owner.store.append(owner.scope, msg) for msg in messages]
+    path = owner.media.root / "tool.png"
+    path.write_bytes(base64.b64decode(PNG))
+    with owner.store.connection(True) as db:
+        db.execute(
+            "INSERT INTO media(id,scope,node,original,path,mime,status) VALUES(?,?,?,?,?,?,?)",
+            (
+                "image-original",
+                owner.scope,
+                ids[1],
+                original,
+                str(path),
+                "image/png",
+                "ready",
+            ),
+        )
+    owner.context = SimpleNamespace(conversation_manager=MemoryConversationManager())
+    bridge = HistoryBridge(owner)
+    try:
+        projected = owner.messages(owner.store.view(owner.scope)["nodes"])
+        assert projected[1]["content"][0]["image_url"]["url"].startswith("data:image/")
+        # Native history can already contain the local representation when its
+        # first mapping is built; the immutable archive still retains the URL.
+        synchronized = owner.store.sync_history(
+            owner.scope, projected, projected, candidates=bridge.candidates(owner.scope)
+        )
+        assert synchronized["ids"] == ids
+        assert (
+            owner.store.node(owner.scope, ids[1])["payload"]["message"] == messages[1]
+        )
+    finally:
+        bridge.close()

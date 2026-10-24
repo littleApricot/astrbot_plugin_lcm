@@ -259,10 +259,14 @@ class HistoryBridge:
             ids = list(
                 dict.fromkeys(ids + state["inputs"] + state.get("output_ids", []))
             )
-        for ident in ids:
-            node = self.owner.store.node(scope, ident)
-            for message in self.owner.messages([node]):
-                result.append({"id": ident, "message": message})
+        nodes = self.owner.store.history_nodes(
+            self.owner.store.node(scope, ident) for ident in ids
+        )
+        # Projection must see the whole tool block, just as the request does.
+        # A single-node projection would classify every tool as incomplete.
+        for node, message in zip(nodes, self.owner.messages(nodes)):
+            ident = node["id"]
+            result.append({"id": ident, "message": message})
             if node["level"] == 0 and node["payload"].get("extra", {}).get(
                 "platform_id"
             ):
