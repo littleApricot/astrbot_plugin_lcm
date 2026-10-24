@@ -164,6 +164,8 @@ class RunnerBridge:
 
             async def step(self):
                 try:
+                    if history:
+                        await history.rebase(event, state)
                     async for result in original_step():
                         capture()
                         yield result
@@ -195,6 +197,7 @@ class RunnerBridge:
 
             runner.step = MethodType(step, runner)
 
+        reset.__signature__ = signature
         self.replacement = reset
         ToolLoopAgentRunner.reset = reset
         ToolLoopAgentRunner._lcm_bridge = self

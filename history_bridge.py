@@ -7,11 +7,15 @@ import copy
 import inspect
 import json
 import re
+from collections import Counter
 from contextvars import ContextVar
 from difflib import SequenceMatcher
 
 from astrbot.api import logger
-from astrbot.core.agent.message import dump_messages_with_checkpoints
+from astrbot.core.agent.message import (
+    bind_checkpoint_messages,
+    dump_messages_with_checkpoints,
+)
 from astrbot.core.pipeline.process_stage.method.agent_sub_stages.internal import (
     InternalAgentSubStage,
 )
@@ -84,6 +88,26 @@ def merge_branch(initial, branch, latest, *, owned=()):
         result.extend(insertions.get(position, []))
         if position < len(latest):
             result.extend(replacements.get(position, [latest[position]]))
+    # Equal text can anchor to an old message that was concurrently deleted.
+    # A round-owned new input must still be present even in that ambiguous diff.
+    needed = Counter(keys(owned))
+    present = Counter(keys(result))
+    missing = []
+    for message in owned:
+        ident = history_key(message)
+        if present[ident] < needed[ident]:
+            missing.append(copy.deepcopy(message))
+            present[ident] += 1
+    if missing:
+        position = next(
+            (
+                i
+                for i, message in enumerate(result)
+                if history_key(message) in owned_keys
+            ),
+            len(result),
+        )
+        result[position:position] = missing
     return result
 
 
@@ -375,6 +399,37 @@ class HistoryBridge:
             if previous is None or safe_history(actual) != before:
                 self.sync(scope, before, actual, event)
             return safe_history(actual)
+
+    async def refresh_request(self, event, req):
+        state = event.get_extra("lcm_prepared")
+        if not state or state.get("owner") is not self.owner:
+            return
+        await self.refresh(state["origin"], state["cid"], event)
+        base = self.owner.store.view(state["scope"], exclude=state["inputs"])
+        state["base"] = base
+        req.contexts = self.owner.messages(base["nodes"])
+        batch = event.get_extra("reply_gate_batch")
+        if batch is not None:
+            req.contexts += copy.deepcopy(batch.past_messages)
+
+    async def rebase(self, event, state):
+        """Use the latest effective base without publishing private tool records."""
+        await self.refresh(state["origin"], state["cid"], event)
+        runner = state["runner"]
+        old = runner.run_context.messages
+        tail = old[state["offset"] :]
+        excluded = [*state["inputs"], *state["output_ids"]]
+        base = self.owner.store.view(state["scope"], exclude=excluded)
+        systems = old[:1] if old and old[0].role == "system" else []
+        inputs = [value for _, value in reversed(state["input_messages"])]
+        prefix = (
+            systems
+            + bind_checkpoint_messages(self.owner.messages(base["nodes"]))
+            + inputs
+        )
+        runner.run_context.messages = prefix + tail
+        state["offset"] = len(prefix)
+        state["base"] = base
 
     async def register(self, event, state):
         state["initial_history"] = serialized(state["runner"].run_context.messages)

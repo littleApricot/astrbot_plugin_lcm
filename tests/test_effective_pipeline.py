@@ -475,3 +475,61 @@ async def test_native_temporary_input_part_is_not_reintroduced_from_raw_archive(
     finally:
         execution.close()
         history.close()
+
+
+@pytest.mark.asyncio
+async def test_each_tool_step_uses_latest_summary_and_other_committed_reply(owner):
+    original = [
+        {"role": "user", "content": "old source question " * 1000},
+        {"role": "assistant", "content": "old source answer " * 1000},
+    ]
+    for value in original:
+        owner.store.append(owner.scope, value, tokens=1000)
+    manager = MemoryConversationManager(original)
+    owner.context = SimpleNamespace(conversation_manager=manager)
+    history = HistoryBridge(owner)
+    owner.history_bridge = history
+    execution = RunnerBridge(owner)
+    try:
+        ev, req = await prepare(owner, "current question", base=original)
+        req.func_tool.add_tool(ChooseMeme())
+        provider = FakeProvider(
+            [
+                LLMResponse(
+                    role="assistant",
+                    tools_call_name=["choose_meme"],
+                    tools_call_args=[{}],
+                    tools_call_ids=["private-lookup"],
+                ),
+                LLMResponse(role="assistant", completion_text="current answer"),
+            ]
+        )
+        loop = await runner(owner, ev, req, provider)
+        loop.tool_executor = FunctionToolExecutor()
+        async for _ in loop.step():
+            pass
+        job_id = owner.store.plan_job(owner.scope, 100)
+        job = owner.store.next_job()
+        assert job_id and job["id"] == job_id
+        owner.store.job_result(job_id, "LATEST_COMPACTED_SUMMARY")
+        assert owner.store.publish(job)
+        await manager.update_conversation(
+            "group",
+            "conv",
+            history=original
+            + [{"role": "assistant", "content": "OTHER_ROUND_FINISHED"}],
+        )
+        await run_to_end(loop)
+        second = str(provider.calls[-1]["contexts"])
+        assert "LATEST_COMPACTED_SUMMARY" in second
+        assert "OTHER_ROUND_FINISHED" in second
+        assert "old source question" not in second
+        assert PRIVATE in second
+        assert second.count("current question") == 1
+        await native_save(manager, ev, req, loop)
+        assert "OTHER_ROUND_FINISHED" in str(manager.history)
+        assert "current answer" in str(manager.history)
+        ev.cleanup_temporary_local_files()
+    finally:
+        execution.close()
+        history.close()

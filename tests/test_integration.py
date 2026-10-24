@@ -477,6 +477,7 @@ async def test_reply_gate_only_shortens_its_copy_and_mentions_bypass(owner, ment
     ev.get_self_id = lambda: "bot"
     ev.stop_event = Mock()
     ev.set_extra("reply_gate_candidate", True)
+    ev.set_extra("reply_gate_memory", "当前人格和长期记忆")
     original = copy.deepcopy(req.contexts)
     gate = ReplyGate(
         owner.context,
