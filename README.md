@@ -1,4 +1,4 @@
-# LCM 上下文与历史 · v0.3.0
+# LCM 上下文与历史 · v0.4.0
 
 为 AstrBot 保存完整聊天与工具执行记录，并在后台把较老内容逐级压缩成历史摘要。提供当前上下文、完整历史和实际模型请求三个查看入口，摘要可以逐层展开到原始完整轮次。
 
@@ -6,9 +6,9 @@
 
 ## 安装与开始使用
 
-1. 刷新下面的共享插件源，搜索“LCM 上下文与历史”安装；也可在插件管理中用仓库地址安装，或从 [v0.3.0 发布页](https://github.com/littleApricot/astrbot_plugin_lcm/releases/tag/v0.3.0) 下载 ZIP 后使用文件安装。
+1. 刷新下面的共享插件源，搜索“LCM 上下文与历史”安装；也可在插件管理中用仓库地址安装，或从 [v0.4.0 发布页](https://github.com/littleApricot/astrbot_plugin_lcm/releases/tag/v0.4.0) 下载 ZIP 后使用文件安装。
 2. 打开插件配置。首次使用可保留 `base_tokens=40000`；`summary_provider_id` 留空时，后台摘要使用该会话当前的回复模型。API Key 沿用 AstrBot 已配置提供商，无需在本插件另填。
-3. 确认 AstrBot 提供商的模型上下文窗口设置正确。含图片的历史需要摘要模型支持视觉；也可以为摘要单独指定已配置的视觉提供商。
+3. 确认 AstrBot 提供商的模型上下文窗口设置正确。正式回复按配置保留最近的历史图片；后台摘要使用图片的文字表示，可以采用文本模型。
 4. 收到新消息后，打开 AstrBot 侧栏中本插件的 `context` 页面。原生页面入口可能位于插件名称下；页面内标题为“上下文与历史”。
 
 共享插件源与之前的回复判断、表情图库和自维护提示词插件相同；已经添加过时，直接刷新原源即可：
@@ -36,6 +36,16 @@ https://raw.githubusercontent.com/littleApricot/astrbot_plugin_reply_gate/main/p
 修改已经压缩的内容，会使受影响的摘要及其上层摘要失效，恢复其余仍有效的来源，再按原规则后台压缩。原始档案和旧摘要保留，页面将有效替换记录标为“历史修订”，可展开查看来源。修改仅作用于已映射到原生历史的记录；从未进入该历史的未回复群消息继续保存和参与上下文。
 
 每次模型调用前读取最新有效历史，包括工具后的下一次调用；已发出的调用保留发出时的输入。本轮用户输入和未结束的工具过程单独保留。历史写入使用短锁，并行生成继续独立进行；旧轮次结束时会保留期间其他回复及历史修改。原生保存失败时不发布该轮输出；若原生已保存而 LCM 同步中断，会在后续请求前核对数据库并补偿。旧版本升级时首次建立对应关系，无法凭空恢复启用前已丢失的历史。原生消息没有稳定 ID，完全同文的重复记录仅能按顺序和本轮来源匹配。
+
+## 图片窗口与原图查回
+
+正式回复默认只传入历史上下文中最近 **5 张**图片，可用 `history_image_limit` 调整。按图片出现顺序计数，同一条历史消息中的多张图片分别计数；更早的图片使用表情图库中已有的名称和描述，未匹配时显示“图片”。匹配只读取已有资料，采用图库插件当前启用的配置；图库未启用、图片尚无描述或查询失败时同样显示“图片”。
+
+这个额度只限制历史部分。当前用户输入、同批尚待回复的消息，以及本轮工具搜索、看图或历史原图读取返回的图片均单独保留，不占用历史图片额度。每次模型调用重新投影最新历史，包括流式回复和工具后的下一次调用。
+
+后台 LCM 整理把全部图片改用同样的文字表示；历史工具的文字结果也会把内嵌图片转成文字，保留消息与媒体标识及原文件路径。模型输入中的历史图片消息附有 `历史消息 id`，成功或正在归档的媒体还带 `媒体 id`。模型可以先用消息 id 调用 `lcm_expand` 取得媒体信息，再用媒体 id 调用 `lcm_expand` 查看已保存的原图。只有模糊的文字、发送者或时间线索时，可先调用 `lcm_search` 定位记录；摘要可通过 `lcm_describe` 查直接来源。
+
+转换仅作用于发给模型的副本。原始图片、消息、有效历史和摘要来源继续保留；“当前上下文”页面展示的历史基底可以含有更多图片，“实际请求”展示本次投影后的提供商逻辑输入。已压缩的历史按摘要显示，原图仍须逐层查回。原图尚未归档或已经缺失时，工具会返回保存状态，不能保证所有旧消息都有本地原文件。
 
 ## 压缩与完整轮次
 
@@ -75,6 +85,7 @@ https://raw.githubusercontent.com/littleApricot/astrbot_plugin_reply_gate/main/p
 | --- | --- | --- |
 | `enabled` | `true` | 启用 LCM；修改后重载插件。 |
 | `base_tokens` | `40000` | 每层容量基准 B，正整数。原始档案不按 B 删除。 |
+| `history_image_limit` | `5` | 正式回复保留的最近历史图片数，按图片出现次数计数；0 将历史图片全部转文字。当前输入和本轮工具图片不占此额度。负数按 0 执行。 |
 | `summary_provider_id` | 空 | 留空使用该会话当前回复提供商；非空使用指定的已配置提供商 ID。 |
 | `summary_prompt` | 空 | 留空使用内置中性历史摘要提示词；修改只影响后续摘要。 |
 | `max_input_tokens` | `0` | 0 按当前 AstrBot 模型的窗口减去最大输出配置自动计算输入预算；正数为额外输入上限，两者都存在时取较小值。 |
@@ -92,9 +103,9 @@ https://raw.githubusercontent.com/littleApricot/astrbot_plugin_reply_gate/main/p
 
 | 工具 | 入参 | 结果 |
 | --- | --- | --- |
-| `lcm_search` | `query: string` 必填、非空；`target: raw/summaries/both` 默认 `both`；`sender: string` 可选；`start_time/end_time: string` 可选、带时区的 ISO 日期；`cursor: string` 默认首页；`limit: integer` 默认 20、范围 1–50。 | `ok`、完整命中记录 `records`、`next_cursor`。记录包含 ID、层级、时间、发送者、正文、轮次和可发现的媒体存档信息。 |
+| `lcm_search` | `query: string` 必填、非空；`target: raw/summaries/both` 默认 `both`；`sender: string` 可选；`start_time/end_time: string` 可选、带时区的 ISO 日期；`cursor: string` 默认首页；`limit: integer` 默认 20、范围 1–50。 | `ok`、命中记录 `records`、`next_cursor`。记录包含 ID、层级、时间、发送者、正文、轮次及媒体 ID、原文件路径和状态；图片原始数据改为文字。 |
 | `lcm_describe` | `id: string` 可选，空为当前目录；`cursor: string` 默认首页。 | `ok`、目录或 `node` 及直接子记录 `records`、`next_cursor`；每页默认 30 项。 |
-| `lcm_expand` | `id: string` 必填，支持消息、轮次、摘要、媒体 ID；`target: children/original` 默认 `original`；`cursor: string` 默认首页；`limit: integer` 默认 1、范围 1–10。 | `ok`、直接子记录或完整原始单元 `units`、下一页游标；每单元包含完整轮次状态和 `records`。媒体 ID 返回 `media`；已归档图片以原生图片工具结果返回，其他媒体给出路径和状态。 |
+| `lcm_expand` | `id: string` 必填，支持消息、轮次、摘要、媒体 ID；`target: children/original` 默认 `original`；`cursor: string` 默认首页；`limit: integer` 默认 1、范围 1–10。 | `ok`、直接子记录或完整原始单元 `units`、下一页游标；每单元包含完整轮次状态和 `records`，内嵌图片改为文字并保留媒体信息。媒体 ID 返回 `media`；已归档图片以原生图片工具结果返回，其他媒体给出路径和状态。 |
 
 普通结果以 JSON 文本返回；参数错误或跨会话访问返回 `ok=false,error`，空搜索返回空列表。搜索游标绑定范围与条件，不应挪到其他查询；其他分页游标应沿用同一节点与展开方式。完整轮次的页可以很大，超出请求预算时仍保留原始数据。
 
@@ -110,6 +121,8 @@ https://raw.githubusercontent.com/littleApricot/astrbot_plugin_reply_gate/main/p
 
 有效历史同步另覆盖原生保存接口、历史改删、图片替换、临时内容过滤、摘要失效、过期压缩发布冲突及并行旧快照回写；测试使用临时数据库，不修改运行中的机器人。
 
+图片窗口另覆盖最近 N 张、同条多图、当前输入与工具图片隔离、工具循环中新增历史、流式请求、图库描述更新、摘要全部转文字，以及通过消息 ID 查到媒体 ID 后读回原始图片字节。对已有真实请求快照进行了离线投影及原生 OpenAI 适配器序列化检查，HTTP 使用本地测试传输，未请求模型服务。
+
 尚未使用真实 QQ 或真实模型服务联调，摘要保真、真实模型的历史查回效果、费用与首字耗时均未验证。浏览器验证使用 AstrBot 原生页面服务和 SDK，父页面的认证请求由隔离宿主模拟；真实用户登录入口仍待安装后验证。
 
 ## 开发验证
@@ -122,7 +135,7 @@ ruff check --isolated --select E4,E7,E9,F,I astrbot_plugin_lcm
 node --check astrbot_plugin_lcm/pages/context/viewer.js
 ```
 
-测试需安装 `pytest`、`pytest-asyncio`，不读取真实 API Key。部分兼容性测试会导入本项目旁边的 `astrbot_plugin_reply_gate`、`astrbot_plugin_self_prompt`，因此应使用完整工作目录。浏览器样例服务器还需 `uvicorn`，浏览器脚本需可用的 `playwright` 和 Chromium；可以通过 `CHROME_EXECUTABLE_PATH` 指向独立测试使用的 Chrome。
+测试需安装 `pytest`、`pytest-asyncio`，不读取真实 API Key。部分兼容性测试会导入本项目旁边的 `astrbot_plugin_reply_gate`、`astrbot_plugin_self_prompt`、`astrbot_plugin_meme_library`，因此应使用完整工作目录。浏览器样例服务器还需 `uvicorn`，浏览器脚本需可用的 `playwright` 和 Chromium；可以通过 `CHROME_EXECUTABLE_PATH` 指向独立测试使用的 Chrome。
 
 ```sh
 PYTHONPATH=/path/to/AstrBot python -m astrbot_plugin_lcm.tests.ui_server

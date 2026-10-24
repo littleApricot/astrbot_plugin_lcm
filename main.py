@@ -21,6 +21,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 
 from .bridge import RunnerBridge, plain
 from .history_bridge import HistoryBridge
+from .image_context import ImageContext
 from .media import MediaArchive
 from .store import Store, encode
 
@@ -79,6 +80,8 @@ class HistoryTool(FunctionTool):
                 result = self.owner.store.expand(self.scope, kwargs.pop("id"), **kwargs)
             self.owner.media.enrich(self.scope, result)
             media = result.get("media")
+            # Text retrieval exposes IDs/paths, not all inline source image bytes.
+            result = await ImageContext(self.owner).text_only(result)
             if (
                 media
                 and media["status"] == "ready"
@@ -335,7 +338,7 @@ class LCM(Star):
                 self,
                 scope,
                 "lcm_search",
-                "搜索本会话原始聊天和各级摘要，按字面关键词匹配。",
+                "搜索本会话原始聊天和各级摘要，按字面关键词匹配，可按发送者和带时区的时间范围缩小范围。结果包含消息 id、轮次及媒体 id、路径和保存状态。要看图片，用 lcm_expand 展开媒体 id。",
                 {
                     "query": text,
                     "target": {"type": "string", "enum": ["raw", "summaries", "both"]},
@@ -351,7 +354,7 @@ class LCM(Star):
                 self,
                 scope,
                 "lcm_describe",
-                "查看当前上下文目录或某个摘要的直接来源。",
+                "查看当前上下文目录或指定摘要的直接来源。返回可继续展开的消息、摘要 id 和媒体信息。已有历史消息 id 时可直接用 lcm_expand；只有模糊线索时先用 lcm_search。",
                 {"id": text, **cursor},
                 [],
             ),
@@ -359,7 +362,7 @@ class LCM(Star):
                 self,
                 scope,
                 "lcm_expand",
-                "逐层展开来源，或读取完整原始轮次、消息、媒体信息和路径。",
+                "用上下文或搜索结果中的 id 读取消息、完整原始轮次或摘要来源。消息结果含媒体 id、原文件路径及保存状态；再传媒体 id 可直接查看已成功归档的原图，图片会返回给视觉模型。缺失或仍在保存的媒体只返回状态。",
                 {
                     "id": text,
                     "target": {"type": "string", "enum": ["children", "original"]},
@@ -501,7 +504,9 @@ class LCM(Star):
                         nodes = [
                             self.store.node(job["scope"], i) for i in job["sources"]
                         ]
-                        source = self.messages(nodes)
+                        source = await ImageContext(self).history(
+                            self.messages(nodes), 0, nodes
+                        )
                         source_notice = "请概括这批历史。来源节点：" + encode(
                             [n["id"] for n in nodes]
                         )

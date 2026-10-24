@@ -9,6 +9,8 @@ from types import MethodType
 
 from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
 
+from .image_context import ImageContext
+
 
 def plain(value):
     if hasattr(value, "model_dump"):
@@ -76,13 +78,30 @@ class ProviderView:
         self._owner.store.snapshot(self._state["scope"], self._state["run"], data)
 
     async def text_chat(self, **kwargs):
+        kwargs = await self._project(kwargs)
         await self._capture(kwargs)
         return await self._provider.text_chat(**kwargs)
 
     async def text_chat_stream(self, **kwargs):
+        kwargs = await self._project(kwargs)
         await self._capture(kwargs)
         async for response in self._provider.text_chat_stream(**kwargs):
             yield response
+
+    async def _project(self, kwargs):
+        contexts = kwargs.get("contexts") or []
+        # The prefix contains system + committed history + this round's inputs.
+        # Current inputs and every tool continuation live outside this history slice.
+        end = max(
+            0,
+            self._state.get("offset", len(contexts))
+            - len(self._state.get("inputs", [])),
+        )
+        keep = max(0, int(self._owner.config.get("history_image_limit", 5)))
+        projected = await ImageContext(self._owner).history(
+            contexts[:end], keep, self._state.get("base", {}).get("nodes", [])
+        )
+        return {**kwargs, "contexts": projected + contexts[end:]}
 
 
 class UnchangedContext:
