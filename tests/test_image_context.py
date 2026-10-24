@@ -77,6 +77,98 @@ async def test_oldest_images_become_text_without_changing_originals(owner, keep)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["count", "tokens"])
+@pytest.mark.parametrize("archived_system", [False, True])
+async def test_known_missing_history_image_uses_text_without_spending_visual_budget(
+    owner, mode, archived_system
+):
+    missing = "https://expired.invalid/history.png"
+    system = (
+        owner.store.append(owner.scope, {"role": "system", "content": "legacy system"})
+        if archived_system
+        else None
+    )
+    older = owner.store.append(owner.scope, message("available"))
+    newer = owner.store.append(owner.scope, message("unavailable", reference=missing))
+    with owner.store.connection(True) as db:
+        db.execute(
+            "INSERT INTO media(id,scope,node,original,status,error) VALUES(?,?,?,?,?,?)",
+            (
+                "missing-image",
+                owner.scope,
+                newer,
+                missing,
+                "missing",
+                "ClientConnectorError",
+            ),
+        )
+    nodes = [
+        owner.store.node(owner.scope, ident)
+        for ident in (system, older, newer)
+        if ident
+    ]
+    projection = ImageContext(owner)
+    projected = await projection.history(
+        [{"role": "system", "content": "current system"}] + owner.messages(nodes),
+        1,
+        nodes,
+        **({"token_budget": 765} if mode == "tokens" else {}),
+    )
+    assert image_count(projected) == 1
+    assert projected[-2]["content"][1]["type"] == "image_url"
+    assert projected[-1]["content"][1] == {"type": "text", "text": "图片"}
+    assert missing not in str(projected)
+    assert newer in str(projected) and "missing-image" in str(projected)
+    assert projection.stats["unavailable_images"] == 1
+    assert projection.stats["retained_images"] == 1
+    assert (
+        owner.store.node(owner.scope, newer)["payload"]["message"]["content"][1][
+            "image_url"
+        ]["url"]
+        == missing
+    )
+    assert owner.media.records(owner.scope, newer)[0]["status"] == "missing"
+
+
+@pytest.mark.asyncio
+async def test_image_metadata_follows_reordered_tool_result(owner):
+    from astrbot_plugin_lcm.tests.test_tool_history_protocol import call
+
+    missing = "https://expired.invalid/tool.png"
+
+    async def describe(reference):
+        assert reference == missing
+        return "表情：拿捏；描述：表示被拿捏、求饶。"
+
+    owner.context = SimpleNamespace(
+        get_registered_star=lambda name: SimpleNamespace(
+            star_cls=SimpleNamespace(decision_image_description=describe)
+        )
+    )
+    tool_image = message("old tool image", reference=missing)
+    tool_image.update(role="tool", tool_call_id="read-image")
+    ids = [
+        owner.store.append(owner.scope, msg, round_id=run)
+        for msg, run in (
+            (call("read-image"), "legacy"),
+            (message("parallel image"), "other"),
+            (tool_image, "editing-run"),
+        )
+    ]
+    with owner.store.connection(True) as db:
+        db.execute(
+            "INSERT INTO media(id,scope,node,original,status) VALUES(?,?,?,?,?)",
+            ("tool-image", owner.scope, ids[2], missing, "missing"),
+        )
+    nodes = [owner.store.node(owner.scope, ident) for ident in ids]
+    projected = await ImageContext(owner).history(owner.messages(nodes), 1, nodes)
+    assert [msg["role"] for msg in projected] == ["assistant", "tool", "user"]
+    assert "拿捏" in str(projected[1]) and ids[2] in str(projected[1])
+    assert "tool-image" in str(projected[1]) and missing not in str(projected)
+    assert image_count(projected[2:]) == 1 and ids[1] in str(projected[2])
+
+
+@pytest.mark.asyncio
 async def test_existing_gallery_document_is_used_and_reflects_edits(owner, tmp_path):
     from collections import OrderedDict
 

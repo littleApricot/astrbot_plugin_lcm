@@ -393,20 +393,8 @@ class LCM(Star):
         ]
 
     def messages(self, nodes):
-        # Group interleaved completed runs into valid call/result blocks. Raw
-        # archive order remains chronological; no event is rewritten or omitted.
-        ordered, seen = [], set()
-        for n in nodes:
-            run = n["round_id"]
-            if run:
-                if run in seen:
-                    continue
-                seen.add(run)
-                ordered.extend(x for x in nodes if x["round_id"] == run)
-            else:
-                ordered.append(n)
         messages = []
-        for node in ordered:
+        for node in self.store.history_nodes(nodes):
             if node["level"]:
                 messages.append(
                     {
@@ -434,25 +422,14 @@ class LCM(Star):
                                 part["image_url"]["url"] = self.media.data_url(
                                     node["scope"], saved["id"]
                                 )["data_url"]
-                # An interrupted call may have no result. Preserve its full
-                # structure as historical data, without inventing a tool result.
-                if node["round_id"]:
-                    with self.store.connection() as db:
-                        run = db.execute(
-                            "SELECT status FROM runs WHERE id=?", (node["round_id"],)
-                        ).fetchone()
-                    if (
-                        run
-                        and run[0] in ("failed", "cancelled", "interrupted")
-                        and (message.get("tool_calls") or message.get("role") == "tool")
-                    ):
-                        message = {
-                            "role": "user",
-                            "content": "[未完成轮次的原始执行记录，状态="
-                            + run[0]
-                            + "]\n"
-                            + encode(message),
-                        }
+                if node.get("_tool_record_reason"):
+                    message = {
+                        "role": "user",
+                        "content": "[历史工具记录，仅为历史资料，状态="
+                        + node["_tool_record_reason"]
+                        + "]\n"
+                        + encode(message),
+                    }
                 messages.append(message)
         return messages
 

@@ -60,37 +60,52 @@ class ImageContext:
 
     async def history(self, messages, keep, nodes=(), *, token_budget=None, model=""):
         """Limit only the supplied history; callers keep current input separate."""
-        ordered, runs = [], set()
-        for node in nodes:
-            run = node["round_id"]
-            if run:
-                if run in runs:
-                    continue
-                runs.add(run)
-                ordered.extend(item for item in nodes if item["round_id"] == run)
-            else:
-                ordered.append(node)
+        ordered = self.owner.store.history_nodes(nodes)
         values = [
             copy.deepcopy(message)
             if isinstance(message, dict)
             else message.model_dump(mode="json")
             for message in messages
         ]
-        images = [
-            part
-            for message in values
-            if isinstance(message.get("content"), list)
-            for part in message["content"]
-            if isinstance(part, dict) and part.get("type") == "image_url"
-        ]
+        aligned, images, unavailable = [], [], set()
+        # The runner may prepend its current system prompt. Archived system
+        # records, if any, still consume their own one-to-one node position.
+        prefix = max(0, len(values) - len(ordered))
+        for position, message in enumerate(values):
+            node = ordered[position - prefix] if position >= prefix else None
+            content = message.get("content")
+            parts = (
+                [
+                    part
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "image_url"
+                ]
+                if isinstance(content, list)
+                else []
+            )
+            media = (
+                self.owner.media.records(node["scope"], node["id"])
+                if node and parts
+                else []
+            )
+            aligned.append((node, media))
+            missing = {
+                item["original"] for item in media if item["status"] == "missing"
+            }
+            missing -= {item["original"] for item in media if item["status"] == "ready"}
+            for part in parts:
+                images.append(part)
+                if part.get("image_url", {}).get("url") in missing:
+                    unavailable.add(id(part))
+        available = [part for part in images if id(part) not in unavailable]
         if token_budget is None:
-            retained = min(len(images), max(0, keep))
+            retained = min(len(available), max(0, keep))
             self.stats = {"mode": "count", "limit": max(0, keep)}
         else:
             token_budget = max(0, token_budget)
             estimator = ImageTokenEstimator(model)
             retained, used = 0, 0
-            for part in reversed(images):
+            for part in reversed(available):
                 cost = estimator.count(part)
                 if used + cost > token_budget:
                     break
@@ -102,15 +117,13 @@ class ImageContext:
                 "estimated_tokens": used,
                 "estimator": estimator.method,
             }
-        self.stats.update(total_images=len(images), retained_images=retained)
-        replace = len(images) - retained
-        seen, node_index = 0, 0
-        for message in values:
-            node = None
-            if message.get("role") != "system":
-                if node_index < len(ordered):
-                    node = ordered[node_index]
-                node_index += 1
+        self.stats.update(
+            total_images=len(images),
+            retained_images=retained,
+            unavailable_images=len(unavailable),
+        )
+        kept = {id(part) for part in available[-retained:]} if retained else set()
+        for message, (node, media) in zip(values, aligned):
             content = message.get("content")
             if isinstance(content, str):
                 message["content"] = await self.text_only(content)
@@ -122,14 +135,12 @@ class ImageContext:
                 if not isinstance(part, dict) or part.get("type") != "image_url":
                     continue
                 has_image = True
-                seen += 1
-                if seen <= replace:
+                if id(part) not in kept:
                     content[index] = {
                         "type": "text",
                         "text": await self.description(part.get("image_url", "")),
                     }
             if has_image and node:
-                media = self.owner.media.records(node["scope"], node["id"])
                 ids = [item["id"] for item in media]
                 content.append(
                     {

@@ -7,6 +7,65 @@ import json
 from collections import defaultdict, deque
 
 
+def ordered_history_nodes(nodes, inactive_rounds=None):
+    """Pair historical tools by protocol IDs, independently of edit ownership.
+
+    Revisions may belong to a later run than the call they answer. Keep every
+    archive node exactly once; incomplete executions become historical data.
+    The returned wrappers are detached from the immutable archive records.
+    """
+    nodes = [dict(node) for node in nodes]
+    inactive_rounds = inactive_rounds or {}
+    pending, groups, results = defaultdict(deque), {}, {}
+    for index, node in enumerate(nodes):
+        message = node.get("payload", {}).get("message", {})
+        calls = message.get("tool_calls") or []
+        is_call = message.get("role") == "assistant" and bool(calls)
+        is_result = message.get("role") == "tool"
+        if not (is_call or is_result):
+            continue
+        reason = inactive_rounds.get(node.get("round_id"))
+        if reason:
+            node["_tool_record_reason"] = reason
+            continue
+        if is_call:
+            ids = [call.get("id") if isinstance(call, dict) else None for call in calls]
+            groups[index] = [None] * len(ids)
+            if not all(isinstance(ident, str) and ident for ident in ids) or len(
+                set(ids)
+            ) != len(ids):
+                node["_tool_record_reason"] = "invalid_call_ids"
+                continue
+            for position, ident in enumerate(ids):
+                pending[str(ident)].append((index, position))
+        elif is_result:
+            ident = str(message.get("tool_call_id") or "")
+            if pending[ident]:
+                call_index, position = pending[ident].popleft()
+                groups[call_index][position] = index
+                results[index] = call_index
+            else:
+                node["_tool_record_reason"] = "unpaired_result"
+
+    complete = set()
+    for index, matches in groups.items():
+        if all(match is not None for match in matches):
+            complete.add(index)
+        else:
+            nodes[index].setdefault("_tool_record_reason", "incomplete_calls")
+            for match in matches:
+                if match is not None:
+                    nodes[match]["_tool_record_reason"] = "incomplete_calls"
+    ordered = []
+    for index, node in enumerate(nodes):
+        if results.get(index) in complete:
+            continue
+        ordered.append(node)
+        if index in complete:
+            ordered.extend(nodes[match] for match in groups[index])
+    return ordered
+
+
 def history_key(message):
     """Compare native serializer aliases without adding fields to model messages."""
 

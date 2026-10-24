@@ -12,7 +12,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from uuid import uuid4
 
-from .history_model import history_key, safe_history
+from .history_model import history_key, ordered_history_nodes, safe_history
 
 
 def encode(value):
@@ -820,6 +820,24 @@ class Store:
                     "UPDATE jobs SET status='conflict',error='sources_changed',ended=? WHERE id=?",
                     (time.time(), job["id"]),
                 )
+
+    def history_nodes(self, nodes):
+        """Assemble valid tool blocks without changing archive/run ownership."""
+        nodes = list(nodes)
+        scopes = {node["scope"] for node in nodes if node.get("round_id")}
+        inactive = {}
+        if scopes:
+            with self.connection() as db:
+                inactive = dict(
+                    db.execute(
+                        "SELECT id,status FROM runs WHERE status IN "
+                        "('failed','cancelled','interrupted') AND scope IN ("
+                        + ",".join("?" for _ in scopes)
+                        + ")",
+                        tuple(scopes),
+                    )
+                )
+        return ordered_history_nodes(nodes, inactive)
 
     def view(self, scope, exclude=()):
         with self.connection() as db:
