@@ -6,9 +6,13 @@ import hashlib
 import json
 import sqlite3
 import time
+from collections import defaultdict
 from contextlib import contextmanager
+from difflib import SequenceMatcher
 from pathlib import Path
 from uuid import uuid4
+
+from .history_model import history_key, safe_history
 
 
 def encode(value):
@@ -94,7 +98,25 @@ class Store:
                     id TEXT PRIMARY KEY, scope TEXT NOT NULL, run TEXT, payload TEXT NOT NULL,
                     created REAL NOT NULL, status TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS native_histories (
+                    scope TEXT PRIMARY KEY, messages TEXT NOT NULL,
+                    ids TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS retirements (
+                    scope TEXT NOT NULL, node TEXT NOT NULL, replacement TEXT,
+                    reason TEXT NOT NULL, created REAL NOT NULL,
+                    PRIMARY KEY(scope,node)
+                );
+                CREATE TABLE IF NOT EXISTS pending_histories (
+                    run TEXT PRIMARY KEY, scope TEXT NOT NULL,
+                    payload TEXT NOT NULL, created REAL NOT NULL
+                );
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(runs)")}
+            if "committed" not in columns:
+                db.execute(
+                    "ALTER TABLE runs ADD COLUMN committed INTEGER NOT NULL DEFAULT 1"
+                )
 
     @contextmanager
     def connection(self, write=False):
@@ -234,6 +256,571 @@ class Store:
                 "UPDATE scopes SET imported=1,version=version+1 WHERE id=?", (scope,)
             )
 
+    def native_history(self, scope):
+        """Return the last successfully reconciled native history and its sidecar IDs."""
+        with self.connection() as db:
+            row = db.execute(
+                "SELECT * FROM native_histories WHERE scope=?", (scope,)
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "messages": json.loads(row["messages"]),
+                "ids": json.loads(row["ids"]),
+                "revision": row["revision"],
+            }
+
+    def stage_history(self, run, scope, payload):
+        """Persist reconciliation metadata before committing to the native DB."""
+        with self.connection(True) as db:
+            db.execute(
+                """INSERT INTO pending_histories(run,scope,payload,created) VALUES(?,?,?,?)
+                ON CONFLICT(run) DO UPDATE SET scope=excluded.scope,payload=excluded.payload,created=excluded.created""",
+                (run, scope, encode(payload), time.time()),
+            )
+
+    def pending_histories(self, scope):
+        """Read durable commit intents; model messages stay ordinary dictionaries."""
+        with self.connection() as db:
+            return [
+                {
+                    "run": row["run"],
+                    "scope": row["scope"],
+                    "payload": json.loads(row["payload"]),
+                }
+                for row in db.execute(
+                    "SELECT * FROM pending_histories WHERE scope=? ORDER BY created",
+                    (scope,),
+                )
+            ]
+
+    def clear_history(self, run):
+        """Clear an applied or explicitly failed native commit intent."""
+        with self.connection(True) as db:
+            db.execute("DELETE FROM pending_histories WHERE run=?", (run,))
+
+    def sync_history(
+        self,
+        scope,
+        before,
+        after,
+        *,
+        candidates=(),
+        run=None,
+        internal=False,
+        editable=(),
+        excluded=(),
+    ):
+        """Follow successful native history edits without rewriting original records.
+
+        Only messages represented in the native sidecar may be removed by a
+        full-list write. Unpublished group messages and concurrent round tails
+        remain independent. Immutable replacement nodes make source IDs exact
+        versions for background summary conflict detection.
+        """
+        before, after = safe_history(before), safe_history(after)
+        editable = set(editable)
+        excluded = set(excluded)
+        with self.connection(True) as db:
+            row = db.execute(
+                "SELECT * FROM native_histories WHERE scope=?", (scope,)
+            ).fetchone()
+            aliases = defaultdict(set)
+            explicit_candidates = set()
+            candidate_priority = {}
+            projected_aliases = defaultdict(set)
+            for priority, candidate in enumerate(candidates):
+                ident = candidate.get("id")
+                if ident and isinstance(candidate.get("message"), dict):
+                    explicit_candidates.add(ident)
+                    candidate_priority[ident] = priority
+                    aliases[ident].add(history_key(candidate["message"]))
+                    if candidate.get("project"):
+                        projected_aliases[ident].add(history_key(candidate["message"]))
+            if row is None:
+                needed = [
+                    item[0]
+                    for item in db.execute(
+                        "SELECT id FROM nodes WHERE scope=? ORDER BY lo,seq", (scope,)
+                    )
+                ]
+            else:
+                needed = (
+                    set(json.loads(row["ids"]))
+                    | explicit_candidates
+                    | editable
+                    | excluded
+                )
+                needed.update(
+                    item[0]
+                    for item in db.execute(
+                        "SELECT id FROM nodes WHERE scope=? AND (active=1 OR round_id=?)",
+                        (scope, run),
+                    )
+                )
+                needed.discard(None)
+            all_nodes = sorted(
+                (self.node(scope, ident, db) for ident in needed),
+                key=lambda node: (node["lo"], node["seq"]),
+            )
+            by_id = {node["id"]: node for node in all_nodes}
+            retired = {
+                item["node"]: item["replacement"]
+                for item in db.execute(
+                    "SELECT * FROM retirements WHERE scope=?", (scope,)
+                )
+            }
+            for node in all_nodes:
+                if node["level"] == 0:
+                    aliases[node["id"]].add(history_key(node["payload"]["message"]))
+                else:
+                    aliases[node["id"]].add(
+                        history_key(
+                            {
+                                "role": "user",
+                                "content": f"[历史摘要 L{node['level']} id={node['id']}，仅为历史资料]\n{node['payload']['text']}",
+                            }
+                        )
+                    )
+
+            def available(ident):
+                if ident in retired or ident in excluded or ident not in by_id:
+                    return False
+                node = by_id[ident]
+                if node["round_id"] and node["round_id"] != run:
+                    pending = db.execute(
+                        "SELECT 1 FROM runs WHERE id=? AND committed=0",
+                        (node["round_id"],),
+                    ).fetchone()
+                    if pending and not node["active"]:
+                        return False
+                return True
+
+            def baseline(messages):
+                used, ids = set(), []
+                # Prefer the active effective version when several immutable
+                # records happen to contain the same native text.
+                pool = sorted(
+                    all_nodes,
+                    key=lambda node: (
+                        not bool(node["active"]),
+                        node["lo"],
+                        node["seq"],
+                    ),
+                )
+                for message in messages:
+                    key = history_key(message)
+                    ident = next(
+                        (
+                            n["id"]
+                            for n in pool
+                            if n["id"] not in used
+                            and available(n["id"])
+                            and key in aliases[n["id"]]
+                        ),
+                        None,
+                    )
+                    ids.append(ident)
+                    if ident:
+                        used.add(ident)
+                return ids
+
+            if row is None:
+                old_messages, old_ids, revision = before, baseline(before), 0
+            else:
+                old_messages = json.loads(row["messages"])
+                old_ids = json.loads(row["ids"])
+                revision = row["revision"]
+
+            def apply(old, old_ids, new, internal_write, allowed):
+                nonlocal revision
+                old_keys = [history_key(message) for message in old]
+                new_keys = [history_key(message) for message in new]
+                opcodes = SequenceMatcher(
+                    None, old_keys, new_keys, autojunk=False
+                ).get_opcodes()
+                ids, used, source_hunks = [None] * len(new), set(), {}
+                equal_positions, moved_positions, projected_sources = (
+                    set(),
+                    set(),
+                    set(),
+                )
+                for tag, start, end, nstart, nend in opcodes:
+                    if tag == "equal":
+                        for position, ident in zip(
+                            range(nstart, nend), old_ids[start:end]
+                        ):
+                            equal_positions.add(position)
+                            # An old generation must not resurrect a node that
+                            # another writer explicitly retired in the meantime.
+                            if ident and available(ident):
+                                if (
+                                    new_keys[position] in projected_aliases[ident]
+                                    and history_key(
+                                        by_id[ident]["payload"].get("message", {})
+                                    )
+                                    != new_keys[position]
+                                ):
+                                    equal_positions.discard(position)
+                                    source_hunks[position] = [ident]
+                                    projected_sources.add(ident)
+                                else:
+                                    ids[position] = ident
+                                    used.add(ident)
+                    else:
+                        sources = [ident for ident in old_ids[start:end] if ident]
+                        for position in range(nstart, nend):
+                            source_hunks[position] = sources
+
+                for position, key in enumerate(new_keys):
+                    if ids[position] is not None or position in equal_positions:
+                        continue
+                    # Existing raw output aliases are matched before a visible
+                    # revision is created. They may still await native commit.
+                    choices = [
+                        ident
+                        for ident in aliases
+                        if ident not in used
+                        and available(ident)
+                        and key in aliases[ident]
+                        and (
+                            ident in explicit_candidates
+                            or ident in old_ids
+                            or run
+                            and by_id[ident]["round_id"] == run
+                        )
+                    ]
+                    choices.sort(
+                        key=lambda ident: (
+                            by_id[ident]["round_id"] != run if run else False,
+                            -candidate_priority.get(ident, -1),
+                            not bool(by_id[ident]["active"]),
+                            by_id[ident]["lo"],
+                            by_id[ident]["seq"],
+                        )
+                    )
+                    if choices:
+                        ident = choices[0]
+                        if (
+                            key in projected_aliases[ident]
+                            and history_key(by_id[ident]["payload"].get("message", {}))
+                            != key
+                        ):
+                            source_hunks[position] = [ident]
+                            projected_sources.add(ident)
+                        elif ident in old_ids:
+                            # Reordering is a new effective version too. Keep
+                            # archive chronology intact and position its new
+                            # version between the retained native anchors.
+                            source_hunks[position] = [ident]
+                            moved_positions.add(position)
+                        else:
+                            ids[position] = ident
+                            used.add(ident)
+
+                removed = (
+                    excluded
+                    | projected_sources
+                    | {
+                        ident
+                        for ident in old_ids
+                        if ident
+                        and ident not in used
+                        and (not internal_write or ident in allowed)
+                    }
+                )
+                changed = set()
+                for position, message in enumerate(new):
+                    if ids[position] is not None or position in equal_positions:
+                        continue
+                    sources = source_hunks.get(position, [])
+                    if internal_write:
+                        # A stale base replacement has no authority over an
+                        # intervening external edit or another round's records.
+                        if sources and any(
+                            ident in retired or ident not in allowed
+                            for ident in sources
+                        ):
+                            continue
+                        if not sources and key_matches_retired(new_keys[position]):
+                            continue
+                    ident = "v_" + uuid4().hex
+                    source_nodes = [by_id[source] for source in sources]
+                    left = next(
+                        (by_id[ids[i]] for i in range(position - 1, -1, -1) if ids[i]),
+                        None,
+                    )
+                    right = next(
+                        (
+                            by_id[ids[i]]
+                            for i in range(position + 1, len(ids))
+                            if ids[i]
+                        ),
+                        None,
+                    )
+                    if source_nodes and position not in moved_positions:
+                        lo, hi = (
+                            min(n["lo"] for n in source_nodes),
+                            max(n["hi"] for n in source_nodes),
+                        )
+                    elif left and right and right["lo"] > left["hi"]:
+                        lo = hi = (left["hi"] + right["lo"]) / 2
+                    elif left:
+                        lo = hi = left["hi"] + 0.5
+                    elif right:
+                        lo = hi = right["lo"] - 0.5
+                    else:
+                        lo = hi = db.execute(
+                            "SELECT COALESCE(MAX(hi),0)+1 FROM nodes WHERE scope=?",
+                            (scope,),
+                        ).fetchone()[0]
+                    source_rounds = {node["round_id"] for node in source_nodes}
+                    round_id = run or (
+                        next(iter(source_rounds)) if len(source_rounds) == 1 else None
+                    )
+                    stamp = (
+                        source_nodes[0]["timestamp"] if source_nodes else time.time()
+                    )
+                    cur = db.execute(
+                        """INSERT INTO nodes(id,scope,level,kind,payload,children,tokens,lo,hi,
+                        round_id,sender,timestamp,received) VALUES(?,?,0,'revision',?,?,?,?,?,?,?,?,?)""",
+                        (
+                            ident,
+                            scope,
+                            encode(
+                                {
+                                    "message": message,
+                                    "extra": {"native_history_revision": True},
+                                }
+                            ),
+                            encode(sources),
+                            self.count(message),
+                            lo,
+                            hi,
+                            round_id,
+                            source_nodes[0]["sender"] if source_nodes else "",
+                            stamp,
+                            time.time(),
+                        ),
+                    )
+                    node = self.node(scope, ident, db)
+                    node["seq"] = cur.lastrowid
+                    by_id[ident] = node
+                    aliases[ident].add(new_keys[position])
+                    ids[position] = ident
+                    used.add(ident)
+                    changed.add(ident)
+
+                # Retire first, then restore valid descendants. This prevents a
+                # multi-message edit from briefly reviving another deleted source.
+                replacements = {}
+                for ident in removed:
+                    replacement = next(
+                        (
+                            ids[position]
+                            for position, sources in source_hunks.items()
+                            if ident in sources
+                            and ids[position]
+                            and ids[position] not in old_ids
+                        ),
+                        None,
+                    )
+                    replacements[ident] = replacement
+                for ident, replacement in replacements.items():
+                    if ident not in retired:
+                        retired[ident] = replacement
+                        db.execute(
+                            "INSERT INTO retirements VALUES(?,?,?,?,?)",
+                            (
+                                scope,
+                                ident,
+                                replacement,
+                                "native_history_edit",
+                                time.time(),
+                            ),
+                        )
+                        db.execute(
+                            "UPDATE nodes SET active=0 WHERE scope=? AND id=?",
+                            (scope, ident),
+                        )
+                        changed.add(ident)
+                if removed:
+                    self._invalidate_summaries(db, scope, removed, retired)
+                for ident in used:
+                    if available(ident):
+                        # Raw sources already represented by a valid active
+                        # summary stay compressed unless that summary was edited.
+                        covered = self._covered_by_active_summary(db, scope, ident)
+                        if not covered:
+                            db.execute(
+                                "UPDATE nodes SET active=1 WHERE scope=? AND id=?",
+                                (scope, ident),
+                            )
+                revision += int(old_keys != new_keys or old_ids != ids or bool(changed))
+                return ids
+
+            def key_matches_retired(key):
+                return any(key in aliases[ident] for ident in retired)
+
+            # Repair a successful native write that was interrupted before the
+            # sidecar commit, using only previously published IDs as authority.
+            if [history_key(message) for message in old_messages] != [
+                history_key(message) for message in before
+            ]:
+                old_ids = apply(old_messages, old_ids, before, False, set())
+                old_messages = before
+            ids = apply(old_messages, old_ids, after, internal, editable)
+            if run:
+                own = [
+                    item["id"]
+                    for item in db.execute(
+                        "SELECT id,kind,source_key FROM nodes WHERE scope=? AND round_id=? AND level=0",
+                        (scope, run),
+                    )
+                    if item["kind"] == "revision"
+                    or (item["source_key"] or "").startswith(run + ":")
+                ]
+                hidden = (set(own) | excluded) - {ident for ident in ids if ident}
+                for ident in hidden:
+                    if ident not in retired:
+                        retired[ident] = None
+                        db.execute(
+                            "INSERT INTO retirements VALUES(?,?,?,?,?)",
+                            (scope, ident, None, "native_unsaved", time.time()),
+                        )
+                        db.execute(
+                            "UPDATE nodes SET active=0 WHERE scope=? AND id=?",
+                            (scope, ident),
+                        )
+                if hidden:
+                    self._invalidate_summaries(db, scope, hidden, retired)
+                db.execute(
+                    "UPDATE runs SET committed=1 WHERE scope=? AND id=?", (scope, run)
+                )
+            elif excluded:
+                for ident in excluded:
+                    if ident not in retired:
+                        retired[ident] = None
+                        db.execute(
+                            "INSERT INTO retirements VALUES(?,?,?,?,?)",
+                            (scope, ident, None, "native_no_save", time.time()),
+                        )
+                        db.execute(
+                            "UPDATE nodes SET active=0 WHERE scope=? AND id=?",
+                            (scope, ident),
+                        )
+                self._invalidate_summaries(db, scope, excluded, retired)
+            db.execute(
+                """INSERT INTO native_histories(scope,messages,ids,revision) VALUES(?,?,?,?)
+                ON CONFLICT(scope) DO UPDATE SET messages=excluded.messages,ids=excluded.ids,revision=excluded.revision""",
+                (scope, encode(after), encode(ids), revision),
+            )
+            db.execute("UPDATE scopes SET version=version+1 WHERE id=?", (scope,))
+            return {"messages": after, "ids": ids, "revision": revision}
+
+    def _covered_by_active_summary(self, db, scope, ident):
+        summaries = {
+            row[0]: json.loads(row[1])
+            for row in db.execute(
+                "SELECT id,children FROM nodes WHERE scope=? AND kind='summary'",
+                (scope,),
+            )
+        }
+        pending = [
+            row[0]
+            for row in db.execute(
+                "SELECT id FROM nodes WHERE scope=? AND active=1 AND kind='summary'",
+                (scope,),
+            )
+        ]
+        seen = set()
+        while pending:
+            parent = pending.pop()
+            if parent in seen:
+                continue
+            seen.add(parent)
+            children = summaries.get(parent, [])
+            if ident in children:
+                return True
+            pending.extend(child for child in children if child in summaries)
+        return False
+
+    def _invalidate_summaries(self, db, scope, sources, retired):
+        summaries = {
+            row["id"]: {**dict(row), "children": json.loads(row["children"])}
+            for row in db.execute(
+                "SELECT id,children,active FROM nodes WHERE scope=? AND kind='summary'",
+                (scope,),
+            )
+        }
+        affected = set(sources)
+        changed = True
+        while changed:
+            changed = False
+            for ident, node in summaries.items():
+                if ident not in affected and affected.intersection(node["children"]):
+                    affected.add(ident)
+                    changed = True
+        invalid = affected.intersection(summaries)
+        roots = [
+            summaries[ident]
+            for ident in invalid
+            if summaries[ident]["active"] and ident not in sources
+        ]
+        for ident in invalid:
+            db.execute(
+                "UPDATE nodes SET active=0 WHERE scope=? AND id=?", (scope, ident)
+            )
+            if ident not in retired:
+                retired[ident] = None
+                db.execute(
+                    "INSERT INTO retirements VALUES(?,?,?,?,?)",
+                    (scope, ident, None, "summary_source_edited", time.time()),
+                )
+
+        def restore(ident, visited):
+            if ident in visited:
+                return
+            visited.add(ident)
+            if ident in retired:
+                if retired[ident]:
+                    restore(retired[ident], visited)
+                elif ident in invalid:
+                    for child in summaries[ident]["children"]:
+                        restore(child, visited)
+                return
+            node = db.execute(
+                "SELECT round_id,active FROM nodes WHERE scope=? AND id=?",
+                (scope, ident),
+            ).fetchone()
+            pending = (
+                db.execute(
+                    "SELECT 1 FROM runs WHERE id=? AND committed=0", (node["round_id"],)
+                ).fetchone()
+                if node["round_id"]
+                else None
+            )
+            if pending and not node["active"]:
+                return
+            if not self._covered_by_active_summary(db, scope, ident):
+                db.execute(
+                    "UPDATE nodes SET active=1 WHERE scope=? AND id=?", (scope, ident)
+                )
+
+        for root in roots:
+            for child in root["children"]:
+                restore(child, set())
+
+        for job in db.execute(
+            "SELECT id,sources FROM jobs WHERE scope=? AND status IN ('queued','running','ready','retry')",
+            (scope,),
+        ).fetchall():
+            if affected.intersection(json.loads(job["sources"])):
+                db.execute(
+                    "UPDATE jobs SET status='conflict',error='sources_changed',ended=? WHERE id=?",
+                    (time.time(), job["id"]),
+                )
+
     def view(self, scope, exclude=()):
         with self.connection() as db:
             state = db.execute("SELECT * FROM scopes WHERE id=?", (scope,)).fetchone()
@@ -298,7 +885,7 @@ class Store:
                 if row is None or not row[0] or row[1] != owner:
                     raise ValueError("round_input_not_reserved")
             db.execute(
-                "INSERT INTO runs(id,scope,version,base,status,started) VALUES(?,?,?,?,'running',?)",
+                "INSERT INTO runs(id,scope,version,base,status,started,committed) VALUES(?,?,?,?,'running',?,0)",
                 (
                     ident,
                     scope,
@@ -314,17 +901,22 @@ class Store:
                 )
         return ident
 
-    def finish(self, run, status="complete", error=""):
+    def finish(self, run, status="complete", error="", activate=True):
         with self.connection(True) as db:
             scope = db.execute(
                 "SELECT scope FROM runs WHERE id=? AND status='running'", (run,)
             ).fetchone()
             if scope:
                 db.execute(
-                    "UPDATE runs SET status=?,ended=?,error=? WHERE id=?",
-                    (status, time.time(), error, run),
+                    "UPDATE runs SET status=?,ended=?,error=?,committed=? WHERE id=?",
+                    (status, time.time(), error, int(activate), run),
                 )
-                db.execute("UPDATE nodes SET active=1 WHERE round_id=?", (run,))
+                if activate:
+                    db.execute(
+                        """UPDATE nodes SET active=1 WHERE round_id=? AND id NOT IN
+                        (SELECT node FROM retirements WHERE scope=?)""",
+                        (run, scope[0]),
+                    )
                 db.execute(
                     "UPDATE scopes SET version=version+1 WHERE id=?", (scope[0],)
                 )
@@ -492,7 +1084,11 @@ class Store:
                 "SELECT * FROM runs WHERE id=? AND scope=?", (ident, scope)
             ).fetchone()
             root = None if run else self.node(scope, ident, db)
-            if target == "children" and root and root["level"] > 0:
+            if (
+                target == "children"
+                and root
+                and (root["level"] > 0 or root["kind"] == "revision")
+            ):
                 children = root["children"]
                 return {
                     "records": [
@@ -507,7 +1103,7 @@ class Store:
             pending = [root] if root else []
             while pending:
                 n = pending.pop()
-                if n["level"]:
+                if n["level"] or n["kind"] == "revision" and n["children"]:
                     pending.extend(
                         self.node(scope, c, db) for c in reversed(n["children"])
                     )
@@ -524,7 +1120,7 @@ class Store:
                     "SELECT * FROM runs WHERE id=? AND scope=?", (unit, scope)
                 ).fetchone()
                 matches = db.execute(
-                    "SELECT id FROM nodes WHERE scope=? AND round_id=? ORDER BY lo,seq",
+                    "SELECT id FROM nodes WHERE scope=? AND round_id=? AND kind='raw' ORDER BY lo,seq",
                     (scope, unit),
                 ).fetchall()
                 if matches:
@@ -553,12 +1149,15 @@ class Store:
     def recover(self):
         with self.connection(True) as db:
             db.execute(
-                "UPDATE nodes SET active=1 WHERE round_id IN (SELECT id FROM runs WHERE status='running')"
+                "UPDATE nodes SET active=1 WHERE round_id IN (SELECT id FROM runs WHERE status='running' AND committed=1) AND id NOT IN (SELECT node FROM retirements)"
             )
             db.execute(
                 "UPDATE runs SET status='interrupted',ended=?,error='process_restarted' WHERE status='running'",
                 (time.time(),),
             )
+            # Keep unfinished output archival only. Native reconciliation can
+            # still recognize a write that succeeded immediately before exit.
+            db.execute("UPDATE runs SET committed=1 WHERE committed=0")
             db.execute("UPDATE nodes SET reservation=NULL")
             db.execute("UPDATE jobs SET status='retry',retry=0 WHERE status='running'")
             db.execute(
@@ -566,8 +1165,16 @@ class Store:
             )
 
     def plan_job(self, scope, budget):
-        view = self.view(scope)
         with self.connection(True) as db:
+            view = {
+                "nodes": [
+                    self.node(scope, item[0], db)
+                    for item in db.execute(
+                        "SELECT id FROM nodes WHERE scope=? AND active=1 ORDER BY lo,seq",
+                        (scope,),
+                    )
+                ]
+            }
             active = db.execute(
                 "SELECT id FROM jobs WHERE scope=? AND status IN ('queued','running','ready','retry')",
                 (scope,),
@@ -585,9 +1192,10 @@ class Store:
                         break
                     if n["round_id"]:
                         run = db.execute(
-                            "SELECT status FROM runs WHERE id=?", (n["round_id"],)
+                            "SELECT status,committed FROM runs WHERE id=?",
+                            (n["round_id"],),
                         ).fetchone()
-                        if run and run[0] == "running":
+                        if run and (run[0] == "running" or not run[1]):
                             break
                     # Retain boundary units; a single giant old unit may advance whole.
                     if candidates and size + n["tokens"] > budget:
@@ -633,7 +1241,7 @@ class Store:
                     if all(not n["reservation"] for n in proposed):
                         running = any(
                             db.execute(
-                                "SELECT 1 FROM runs WHERE id=? AND status='running'",
+                                "SELECT 1 FROM runs WHERE id=? AND (status='running' OR committed=0)",
                                 (n["round_id"],),
                             ).fetchone()
                             for n in proposed
@@ -674,14 +1282,18 @@ class Store:
     def job_result(self, ident, text):
         with self.connection(True) as db:
             db.execute(
-                "UPDATE jobs SET status='ready',result=? WHERE id=?", (text, ident)
+                "UPDATE jobs SET status='ready',result=? WHERE id=? AND status IN ('queued','running','retry','ready')",
+                (text, ident),
             )
 
     def fail_job(self, ident, error):
         with self.connection(True) as db:
-            attempts = db.execute(
-                "SELECT attempts FROM jobs WHERE id=?", (ident,)
-            ).fetchone()[0]
+            row = db.execute(
+                "SELECT attempts,status FROM jobs WHERE id=?", (ident,)
+            ).fetchone()
+            if row["status"] in ("conflict", "complete"):
+                return
+            attempts = row["attempts"]
             db.execute(
                 "UPDATE jobs SET status='retry',error=?,retry=? WHERE id=?",
                 (error, time.time() + min(3600, 30 * 2 ** min(attempts, 7)), ident),
@@ -692,12 +1304,22 @@ class Store:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (job["id"],)).fetchone()
             if row["status"] == "complete":
                 return True
+            if row["status"] == "conflict":
+                return False
             if row["status"] != "ready":
                 raise ValueError("summary_not_ready")
             sources = [
                 self.node(job["scope"], i, db) for i in json.loads(row["sources"])
             ]
-            if any(not n["active"] or n["reservation"] for n in sources):
+            if any(
+                not n["active"]
+                or n["reservation"]
+                or db.execute(
+                    "SELECT 1 FROM retirements WHERE scope=? AND node=?",
+                    (job["scope"], n["id"]),
+                ).fetchone()
+                for n in sources
+            ):
                 db.execute(
                     "UPDATE jobs SET status='conflict',error='sources_changed',ended=? WHERE id=?",
                     (time.time(), job["id"]),
@@ -707,7 +1329,7 @@ class Store:
                 if (
                     n["round_id"]
                     and db.execute(
-                        "SELECT 1 FROM runs WHERE id=? AND status='running'",
+                        "SELECT 1 FROM runs WHERE id=? AND (status='running' OR committed=0)",
                         (n["round_id"],),
                     ).fetchone()
                 ):

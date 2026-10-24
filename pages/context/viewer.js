@@ -39,7 +39,7 @@ function card(record,compact=false){
   const root=element('article',undefined,'card'+(summary?' summary':''));root.dataset.id=record.id||'';
   const head=element('div',undefined,'card-head'),title=element('div');
   title.append(element('span',summary?'L'+record.level:role==='user'?'用户':role==='assistant'?'机器人':role==='tool'?'工具':role,'badge '+(summary?'':role==='tool'?'tool':role==='assistant'?'assistant':'raw')));
-  title.append(document.createTextNode(summary?'历史摘要':record.sender||message.name||''));
+  title.append(document.createTextNode(summary?'历史摘要':record.kind==='revision'?'历史修订 · '+(record.sender||message.name||''):record.sender||message.name||''));
   head.append(title,element('span',record.timestamp?date(record.timestamp,record.payload?.extra?.time_unknown):'','meta'));
   root.append(head);
   const body=element('div',undefined,'card-body');
@@ -63,7 +63,7 @@ function card(record,compact=false){
   if(record.media?.length){for(const m of record.media){const btn=element('button','原媒体 · '+(m.status==='ready'?'查看':m.status),'media-button');btn.disabled=m.status!=='ready';btn.onclick=async()=>{try{const r=await api('media',{id:m.id});if(r.mime.startsWith('image/')){const img=element('img');img.className='media-img';img.src=r.data_url;img.alt='归档原图';body.append(img);}else{const link=element('a','下载原媒体');link.href=r.data_url;link.download=m.id;body.append(link);}}catch(e){notice(e.message,true);}};body.append(btn);}}
   const foot=element('div',undefined,'card-foot');
   foot.append(element('span',[record.id,record.tokens?size(record.tokens)+' tokens（估算）':'',record.round_id?'整轮 '+record.round_id.slice(0,10):''].filter(Boolean).join(' · ')));
-  if(record.id){const btn=element('button',summary?'逐层查看来源':'查看完整轮次');btn.onclick=()=>inspect(record.id);foot.append(btn);}
+  if(record.id){const btn=element('button',summary||record.kind==='revision'?'逐层查看来源':'查看完整轮次');btn.onclick=()=>inspect(record.id);foot.append(btn);}
   root.append(foot);return root;
 }
 function empty(title,text){const box=element('div',undefined,'empty');box.append(element('div','◇','icon'),element('h2',title),element('p',text));return box;}
@@ -136,7 +136,7 @@ async function inspect(id,reset=true){
   $('inspector').hidden=false;$('layout').classList.add('inspecting');$('source').textContent='正在读取来源…';
   try{const data=await api('describe',{id});$('breadcrumbs').replaceChildren();state.trail.forEach((key,index)=>{const b=element('button',index===0?'来源':key.slice(0,10));b.onclick=()=>{state.trail=state.trail.slice(0,index);inspect(key,false);};$('breadcrumbs').append(b);});
     $('source').replaceChildren(card(data.node,true));
-    if(data.node.level>0){$('source').append(element('div','直接来源 · 按原时间顺序','source-label'));for(const r of data.records){const c=card(r,true);c.querySelector('.card-foot button').onclick=()=>inspect(r.id,false);$('source').append(c);}if(data.next_cursor){const more=element('button','更多直接来源');more.onclick=async()=>{const next=await api('describe',{id,cursor:data.next_cursor});data.next_cursor=next.next_cursor;for(const r of next.records){const c=card(r,true);c.querySelector('.card-foot button').onclick=()=>inspect(r.id,false);more.before(c);}more.hidden=!next.next_cursor;};$('source').append(more);}}
+    if(data.node.level>0||data.node.kind==='revision'){$('source').append(element('div','直接来源 · 按原时间顺序','source-label'));for(const r of data.records){const c=card(r,true);c.querySelector('.card-foot button').onclick=()=>inspect(r.id,false);$('source').append(c);}if(data.next_cursor){const more=element('button','更多直接来源');more.onclick=async()=>{const next=await api('describe',{id,cursor:data.next_cursor});data.next_cursor=next.next_cursor;for(const r of next.records){const c=card(r,true);c.querySelector('.card-foot button').onclick=()=>inspect(r.id,false);more.before(c);}more.hidden=!next.next_cursor;};$('source').append(more);}}
     const original=element('button','查看原始完整轮次');original.onclick=()=>originals(id);$('source').append(original);
   }catch(e){$('source').textContent=e.message;}
 }

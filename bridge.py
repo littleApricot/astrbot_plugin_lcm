@@ -127,6 +127,9 @@ class RunnerBridge:
             state["offset"] = len(runner.run_context.messages)
             state["outputs"] = 0
             state["runner"] = runner
+            history = getattr(owner, "history_bridge", None)
+            if history:
+                await history.register(event, state)
             event.set_extra("lcm_run", state["run"])
             runner.request_context_manager = UnchangedContext()
             # Native overflow spilling replaces tool text. LCM retains it in full.
@@ -140,13 +143,22 @@ class RunnerBridge:
             def capture():
                 new = runner.run_context.messages[state["offset"] :]
                 for message in new[state["outputs"] :]:
-                    owner.store.append(
+                    ident = owner.store.append(
                         state["scope"],
                         plain(message),
                         round_id=state["run"],
                         sender="机器人",
                         source=f"{state['run']}:{state['outputs']}",
                     )
+                    if history:
+                        from .history_bridge import serialized
+
+                        state["output_ids"].append(ident)
+                        state["output_messages"].append((ident, message))
+                        # Serializing each output separately preserves its exact
+                        # native alias; pair validation happens on the full save.
+                        for alias in serialized([message]):
+                            state["aliases"].append({"id": ident, "message": alias})
                     state["outputs"] += 1
                 owner.wake.set()
 
@@ -163,6 +175,7 @@ class RunnerBridge:
                         if isinstance(exc, asyncio.CancelledError)
                         else "failed",
                         type(exc).__name__,
+                        activate=history is None,
                     )
                     raise
                 finally:
@@ -176,7 +189,9 @@ class RunnerBridge:
                             if final and final.role == "assistant"
                             else "failed"
                         )
-                        owner.store.finish(state["run"], status)
+                        owner.store.finish(
+                            state["run"], status, activate=history is None
+                        )
 
             runner.step = MethodType(step, runner)
 

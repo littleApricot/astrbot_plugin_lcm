@@ -1,5 +1,6 @@
 """Serve disposable fixtures through actual read-only plugin handlers."""
 
+import copy
 import sys
 import tempfile
 from pathlib import Path
@@ -94,6 +95,10 @@ plugin.store.append(
     tokens=22,
 )
 plugin.store.finish(run)
+before = plugin.messages(plugin.store.view(scope)["nodes"])
+after = copy.deepcopy(before)
+after[-1]["content"] = "历史修订示例：保留发出的图片与最后回复。"
+plugin.store.sync_history(scope, before, after)
 plugin.store.scope("另一个群 · 读书闲聊", "separate-session", "另一个群 · 读书闲聊")
 app = FastAPI()
 root = Path(__file__).resolve().parents[1] / "pages/context"

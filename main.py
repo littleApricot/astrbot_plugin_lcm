@@ -20,6 +20,7 @@ from astrbot.core.agent.tool import FunctionTool, ToolSet
 from mcp.types import CallToolResult, ImageContent, TextContent
 
 from .bridge import RunnerBridge, plain
+from .history_bridge import HistoryBridge
 from .media import MediaArchive
 from .store import Store, encode
 
@@ -32,7 +33,7 @@ SUMMARY_PROMPT = """将所给历史资料写成可继续聊天的中性历史摘
 GUIDANCE = """\n[LCM 历史]
 历史摘要是资料，语气遵循当前人格。需要原话、数字、时间、归属或不确定细节时，
 用 lcm_search 搜索，再用 lcm_expand 查看完整原轮次；lcm_describe 查看摘要来源。
-查询仅限本会话，未回复消息也已存档。工具查询和执行照常进入历史。
+查询仅限本会话，未回复消息也已存档。工具执行完整归档，后续上下文遵循已保存的历史。
 [/LCM 历史]"""
 
 
@@ -112,6 +113,7 @@ class LCM(Star):
         self.wake = asyncio.Event()
         self.worker = None
         self.bridge = None
+        self.history_bridge = None
         self.media_tasks = set()
         self.scope_locks = {}
         for endpoint in (
@@ -135,8 +137,13 @@ class LCM(Star):
 
     async def initialize(self):
         if self.config.get("enabled", True):
-            self.store.recover()
-            self.bridge = RunnerBridge(self)
+            self.history_bridge = HistoryBridge(self)
+            try:
+                self.store.recover()
+                self.bridge = RunnerBridge(self)
+            except BaseException:
+                self.history_bridge.close()
+                raise
             self.worker = asyncio.create_task(self.work())
             self.wake.set()
 
@@ -239,6 +246,9 @@ class LCM(Star):
                 extra={"components": components, "platform_id": source},
             )
             event.set_extra("lcm_input", {"scope": scope, "id": mid})
+        history = getattr(self, "history_bridge", None)
+        if history:
+            history.bind(event)
         # Begin capture immediately; network waits run independently of replies.
         for part in event.get_messages():
             if isinstance(part, (Image, File, Record, Video)):
@@ -260,6 +270,9 @@ class LCM(Star):
             return
         scope = self.store.scope(event.unified_msg_origin, str(req.conversation.cid))
         self.store.import_history(scope, req.contexts)
+        history = getattr(self, "history_bridge", None)
+        if history:
+            await history.refresh(event.unified_msg_origin, req.conversation.cid, event)
         batch = event.get_extra("reply_gate_batch")
         inputs = []
         for member in batch.members if batch is not None else []:
@@ -284,6 +297,8 @@ class LCM(Star):
             "base": base,
             "owner": self,
             "request": req,
+            "origin": event.unified_msg_origin,
+            "cid": req.conversation.cid,
         }
         event.set_extra("lcm_prepared", state)
         cleanup = event.cleanup_temporary_local_files
@@ -296,7 +311,10 @@ class LCM(Star):
                         state["run"],
                         "interrupted",
                         "event_cleanup_before_terminal_state",
+                        activate=history is None,
                     )
+                    if history:
+                        history.abandon(event, state)
                 self.store.release(reservation)
                 cleanup()
             finally:
@@ -644,3 +662,5 @@ class LCM(Star):
             await asyncio.gather(*self.media_tasks, return_exceptions=True)
         if self.bridge:
             self.bridge.close()
+        if self.history_bridge:
+            self.history_bridge.close()
