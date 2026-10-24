@@ -162,12 +162,14 @@ class ViewImages(FunctionTool):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("mode", ["count", "tokens"])
 async def test_native_tool_loop_preserves_current_and_tool_images(
-    owner, shared, monkeypatch, tmp_path
+    owner, shared, mode, monkeypatch, tmp_path
 ):
     from astrbot.core.agent.tool_image_cache import tool_image_cache
 
     monkeypatch.setattr(tool_image_cache, "_cache_dir", str(tmp_path / "tool_images"))
+    owner.config.update(history_image_mode=mode, history_image_token_budget=920)
     for index in range(8):
         owner.store.append(owner.scope, message("history" + str(index)))
     history = None
@@ -192,6 +194,7 @@ async def test_native_tool_loop_preserves_current_and_tool_images(
                 LLMResponse(role="assistant", completion_text="finished"),
             ]
         )
+        provider.get_model = lambda: "deepseek-flash"
         loop = await runner(owner, ev, req, provider)
         loop.tool_executor = FunctionToolExecutor()
         async for _ in loop.step():
@@ -221,6 +224,10 @@ async def test_native_tool_loop_preserves_current_and_tool_images(
         snapshots = owner.store.requests(owner.scope, ev.get_extra("lcm_run"))
         latest = owner.store.request(owner.scope, snapshots[-1]["id"])
         assert image_count(latest["payload"]["contexts"]) == 14
+        window = latest["payload"]["history_image_window"]
+        assert window["mode"] == mode and window["retained_images"] == 5
+        if mode == "tokens":
+            assert window["estimated_tokens"] == 920
     finally:
         execution.close()
         if history:
@@ -253,8 +260,11 @@ async def test_retrieval_ids_reopen_original_bytes_after_image_projection(
 
 
 @pytest.mark.asyncio
-async def test_streaming_uses_same_history_only_limit(owner):
+@pytest.mark.parametrize("mode", ["count", "tokens"])
+async def test_streaming_uses_same_history_only_limit(owner, mode):
+    owner.config.update(history_image_mode=mode, history_image_token_budget=920)
     provider = FakeProvider()
+    provider.get_model = lambda: "deepseek-flash"
 
     async def stream(**kwargs):
         provider.calls.append(kwargs)

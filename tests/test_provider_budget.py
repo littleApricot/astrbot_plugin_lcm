@@ -85,6 +85,24 @@ def test_old_duplicate_option_is_removed_from_saved_config(tmp_path):
     assert saved["base_tokens"] == 50000
 
 
+@pytest.mark.parametrize("mode", [None, "tokens"])
+def test_image_mode_upgrade_preserves_existing_configuration(tmp_path, mode):
+    schema = json.loads(
+        (Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text()
+    )
+    settings = {"history_image_limit": 9}
+    if mode:
+        settings.update(history_image_mode=mode, history_image_token_budget=1536)
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(settings))
+    config = AstrBotConfig(str(path), schema=schema)
+    assert config["history_image_mode"] == (mode or "count")
+    assert config["history_image_token_budget"] == (1536 if mode else 4096)
+    assert config["history_image_limit"] == 9
+    saved = json.loads(path.read_text(encoding="utf-8-sig"))
+    assert saved["history_image_mode"] == config["history_image_mode"]
+
+
 @pytest.mark.asyncio
 async def test_native_openai_payload_matches_lcm_reserve_and_budget_guard(tmp_path):
     calls = []

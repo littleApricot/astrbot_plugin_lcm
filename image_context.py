@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import re
 
+from .image_tokens import ImageTokenEstimator
+
 DATA_IMAGE = re.compile(r"data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+")
 
 
@@ -56,7 +58,7 @@ class ImageContext:
             return "".join(parts) + value[offset:]
         return value
 
-    async def history(self, messages, keep, nodes=()):
+    async def history(self, messages, keep, nodes=(), *, token_budget=None, model=""):
         """Limit only the supplied history; callers keep current input separate."""
         ordered, runs = [], set()
         for node in nodes:
@@ -74,14 +76,34 @@ class ImageContext:
             else message.model_dump(mode="json")
             for message in messages
         ]
-        total = sum(
-            part.get("type") == "image_url"
+        images = [
+            part
             for message in values
             if isinstance(message.get("content"), list)
             for part in message["content"]
-            if isinstance(part, dict)
-        )
-        replace = max(0, total - max(0, keep))
+            if isinstance(part, dict) and part.get("type") == "image_url"
+        ]
+        if token_budget is None:
+            retained = min(len(images), max(0, keep))
+            self.stats = {"mode": "count", "limit": max(0, keep)}
+        else:
+            token_budget = max(0, token_budget)
+            estimator = ImageTokenEstimator(model)
+            retained, used = 0, 0
+            for part in reversed(images):
+                cost = estimator.count(part)
+                if used + cost > token_budget:
+                    break
+                retained += 1
+                used += cost
+            self.stats = {
+                "mode": "tokens",
+                "budget": token_budget,
+                "estimated_tokens": used,
+                "estimator": estimator.method,
+            }
+        self.stats.update(total_images=len(images), retained_images=retained)
+        replace = len(images) - retained
         seen, node_index = 0, 0
         for message in values:
             node = None
@@ -119,7 +141,7 @@ class ImageContext:
                     }
                 )
         # Summaries also sanitize serialized tool results and interrupted records.
-        if keep == 0:
+        if retained == 0:
             values = await self.text_only(values)
         return [
             value

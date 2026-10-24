@@ -1,7 +1,9 @@
 {
   "enabled": {"description":"启用 LCM（修改后重载插件）","type":"bool","default":true},
   "base_tokens": {"description":"分层容量 B（估算 tokens）","type":"int","default":40000,"hint":"每层达到约 2B 时后台压缩较老约 B 的完整轮次；边界轮次保留在较新一侧。"},
-  "history_image_limit": {"description":"历史上下文保留图片数","type":"int","default":5,"hint":"只向回复模型传入历史上下文中最近 N 张图片。更早图片使用已有表情包名称和描述，未匹配显示“图片”。0 表示历史图片全部转文字。当前用户输入及本轮工具返回的图片不占此额度；后台摘要的图片全部转文字。"},
+  "history_image_mode": {"description":"历史图片保留模式","type":"string","default":"count","options":["count","tokens"],"hint":"count 按图片张数，tokens 按图片 token 估算预算；两种模式互斥。仅限制历史图片，优先保留最近图片，当前输入和本轮工具图片单独保留。"},
+  "history_image_limit": {"description":"历史上下文保留图片数","type":"int","default":5,"hint":"count 模式生效，只传入历史上下文中最近 N 张图片。更早图片使用已有表情包名称和描述，未匹配显示“图片”。0 表示历史图片全部转文字。后台摘要的图片全部转文字。"},
+  "history_image_token_budget": {"description":"历史图片 token 预算（估算）","type":"int","default":4096,"hint":"tokens 模式生效，从最新历史图片向前累加，遇到放不下的图片后，更早图片均转成文字。0 表示历史图片全部转文字。DeepSeek Flash 按官方图片尺寸规则估算，无法读取尺寸按每张 1024 估算；其他模型暂沿用 AstrBot 通用估算。与接口实际计费可能有差异，不限制图片上传字节数。"},
   "summary_provider_id": {"description":"摘要模型提供商 ID","type":"string","default":"","hint":"留空使用该会话当前回复模型。需要模型返回可验证的正常结束标志。"},
   "summary_prompt": {"description":"摘要提示词","type":"text","default":"","hint":"留空使用内置中性历史摘要提示词。修改只影响后续压缩。"},
   "max_input_tokens": {"description":"请求输入预算（0 自动计算）","type":"int","default":0,"hint":"自动读取当前 AstrBot 模型窗口及最大输出 tokens 计算可用输入。非零为额外输入上限；超过有效预算时保留原文并报错。"},

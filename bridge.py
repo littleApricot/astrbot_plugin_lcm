@@ -33,7 +33,7 @@ class ProviderView:
     def __getattr__(self, name):
         return getattr(self._provider, name)
 
-    async def _capture(self, kwargs):
+    async def _capture(self, kwargs, image_window=None):
         tools = kwargs.get("func_tool")
         schemas = (
             [
@@ -70,6 +70,8 @@ class ProviderView:
             input_kind="provider_logical_request",
             token_method="estimate",
         )
+        if image_window is not None:
+            data["history_image_window"] = image_window
         limit = self._owner.hard_limit(self._provider)
         if limit > 0 and self._owner.store.count(data) > limit:
             raise ValueError(
@@ -78,13 +80,13 @@ class ProviderView:
         self._owner.store.snapshot(self._state["scope"], self._state["run"], data)
 
     async def text_chat(self, **kwargs):
-        kwargs = await self._project(kwargs)
-        await self._capture(kwargs)
+        kwargs, image_window = await self._project(kwargs)
+        await self._capture(kwargs, image_window)
         return await self._provider.text_chat(**kwargs)
 
     async def text_chat_stream(self, **kwargs):
-        kwargs = await self._project(kwargs)
-        await self._capture(kwargs)
+        kwargs, image_window = await self._project(kwargs)
+        await self._capture(kwargs, image_window)
         async for response in self._provider.text_chat_stream(**kwargs):
             yield response
 
@@ -98,10 +100,21 @@ class ProviderView:
             - len(self._state.get("inputs", [])),
         )
         keep = max(0, int(self._owner.config.get("history_image_limit", 5)))
-        projected = await ImageContext(self._owner).history(
-            contexts[:end], keep, self._state.get("base", {}).get("nodes", [])
+        mode = self._owner.config.get("history_image_mode", "count")
+        budget = (
+            max(0, int(self._owner.config.get("history_image_token_budget", 4096)))
+            if mode == "tokens"
+            else None
         )
-        return {**kwargs, "contexts": projected + contexts[end:]}
+        projection = ImageContext(self._owner)
+        projected = await projection.history(
+            contexts[:end],
+            keep,
+            self._state.get("base", {}).get("nodes", []),
+            token_budget=budget,
+            model=kwargs.get("model") or self._provider.get_model(),
+        )
+        return {**kwargs, "contexts": projected + contexts[end:]}, projection.stats
 
 
 class UnchangedContext:
