@@ -63,7 +63,7 @@ def event(mid="new"):
 @pytest.fixture
 def owner(tmp_path):
     obj = object.__new__(LCM)
-    obj.config = {"base_tokens": 40, "output_reserve_tokens": 10}
+    obj.config = {"base_tokens": 40}
     obj.store = Store(tmp_path / "history.db")
     obj.media = MediaArchive(obj.store)
     obj.wake = asyncio.Event()
@@ -122,9 +122,15 @@ async def test_incoming_unanswered_events_are_archived_once_with_timezone(owner)
 
 
 def test_invalid_provider_window_reserve_is_explicit(owner):
-    owner.config["output_reserve_tokens"] = 100
     with pytest.raises(ValueError, match="reserve"):
-        owner.hard_limit(SimpleNamespace(provider_config={"max_context_tokens": 80}))
+        owner.hard_limit(
+            SimpleNamespace(
+                provider_config={
+                    "max_context_tokens": 80,
+                    "custom_extra_body": {"max_tokens": 100},
+                }
+            )
+        )
 
 
 async def prepare(owner, text="current", base=None):
@@ -385,6 +391,7 @@ async def test_actual_search_tool_round_and_existing_memory_collection(owner, tm
     memory = object.__new__(SelfPrompt)
     memory.config = {}
     memory.memory_queue = MemoryQueue(tmp_path / "memory.sqlite3")
+    memory.store = memory.memory_queue
     memory._selected_persona = AsyncMock(return_value="persona")
     memory._start_worker = lambda: None
     await memory.collect_history(ev)

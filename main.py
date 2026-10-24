@@ -142,9 +142,41 @@ class LCM(Star):
 
     def hard_limit(self, provider):
         configured = int(self.config.get("max_input_tokens", 0))
-        maximum = int(provider.provider_config.get("max_context_tokens", 0) or 0)
-        output = int(self.config.get("output_reserve_tokens", 8192))
-        if output < 0 or configured < 0:
+        model_config = provider.provider_config
+        maximum = int(model_config.get("max_context_tokens", 0) or 0)
+        body = model_config.get("custom_extra_body") or {}
+        # Responses' explicit field overrides its max_tokens alias. Other
+        # adapters commonly use max_tokens; reserve from the selected model.
+        output = None
+        kind = model_config.get("type")
+        fields = {
+            "anthropic_chat_completion": ("max_tokens",),
+            "googlegenai_chat_completion": ("max_tokens", "maxOutputTokens"),
+            "openai_chat_completion": ("max_completion_tokens", "max_tokens"),
+        }.get(
+            kind,
+            (
+                "max_output_tokens",
+                "max_completion_tokens",
+                "max_tokens",
+                "maxOutputTokens",
+            ),
+        )
+        if isinstance(body, dict):
+            for key in fields:
+                value = body.get(key)
+                if not isinstance(value, (int, str)) or isinstance(value, bool):
+                    continue
+                try:
+                    output = int(value)
+                except ValueError:
+                    continue
+                if output > 0:
+                    break
+                output = None
+        if output is None:
+            output = 65536 if kind == "anthropic_chat_completion" else 8192
+        if configured < 0:
             raise ValueError("LCM token budgets must not be negative")
         if maximum and maximum <= output:
             raise ValueError("LCM output reserve exhausts the configured model window")
