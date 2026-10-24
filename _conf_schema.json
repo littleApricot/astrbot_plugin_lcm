@@ -1,0 +1,9 @@
+{
+  "enabled": {"description":"启用 LCM（修改后重载插件）","type":"bool","default":true},
+  "base_tokens": {"description":"分层容量 B（估算 tokens）","type":"int","default":40000,"hint":"每层达到约 2B 时后台压缩较老约 B 的完整轮次；边界轮次保留在较新一侧。"},
+  "summary_provider_id": {"description":"摘要模型提供商 ID","type":"string","default":"","hint":"留空使用该会话当前回复模型。需要模型返回可验证的正常结束标志。"},
+  "summary_prompt": {"description":"摘要提示词","type":"text","default":"","hint":"留空使用内置中性历史摘要提示词。修改只影响后续压缩。"},
+  "max_input_tokens": {"description":"请求输入预算（0 使用模型窗口）","type":"int","default":0,"hint":"估算输入超过此值时明确报错，保留全部历史，等待后台压缩；不会自动丢弃原文。"},
+  "output_reserve_tokens": {"description":"从模型窗口预留的输出 tokens","type":"int","default":8192},
+  "summary_timeout_seconds": {"description":"后台摘要超时秒数","type":"int","default":180}
+}
