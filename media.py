@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import mimetypes
 import shutil
 from pathlib import Path
@@ -62,12 +63,23 @@ class MediaArchive:
 
     def records(self, scope, node):
         with self.store.connection() as db:
-            return [
-                dict(r)
-                for r in db.execute(
-                    "SELECT * FROM media WHERE scope=? AND node=?", (scope, node)
-                )
-            ]
+            records, pending, visited = {}, [node], set()
+            while pending:
+                ident = pending.pop()
+                if ident in visited:
+                    continue
+                visited.add(ident)
+                for row in db.execute(
+                    "SELECT * FROM media WHERE scope=? AND node=?", (scope, ident)
+                ):
+                    records[row["id"]] = dict(row)
+                source = db.execute(
+                    "SELECT kind,children FROM nodes WHERE scope=? AND id=?",
+                    (scope, ident),
+                ).fetchone()
+                if source and source["kind"] == "revision":
+                    pending.extend(json.loads(source["children"]))
+            return list(records.values())
 
     def enrich(self, scope, result):
         """Attach discoverable archive assets to tool and viewer results."""

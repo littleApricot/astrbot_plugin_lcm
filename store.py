@@ -479,7 +479,14 @@ class Store:
                     else:
                         sources = [ident for ident in old_ids[start:end] if ident]
                         for position in range(nstart, nend):
-                            source_hunks[position] = sources
+                            # Equal-size edits keep positional provenance. Giving
+                            # every new message the whole hunk would map a fresh
+                            # input to an unrelated earlier replacement.
+                            if end - start == nend - nstart:
+                                ident = old_ids[start + position - nstart]
+                                source_hunks[position] = [ident] if ident else []
+                            else:
+                                source_hunks[position] = sources
 
                 for position, key in enumerate(new_keys):
                     if ids[position] is not None or position in equal_positions:
@@ -888,18 +895,41 @@ class Store:
             }
 
     def reserve(self, scope, ids, owner):
+        """Reserve current input versions while keeping their original IDs traceable."""
+        resolved = []
         with self.connection(True) as db:
             for ident in ids:
-                row = db.execute(
-                    "SELECT active,reservation FROM nodes WHERE scope=? AND id=?",
-                    (scope, ident),
-                ).fetchone()
+                visited = set()
+                while ident not in visited:
+                    visited.add(ident)
+                    row = db.execute(
+                        "SELECT active,reservation FROM nodes WHERE scope=? AND id=?",
+                        (scope, ident),
+                    ).fetchone()
+                    if row is None:
+                        break
+                    if row[0]:
+                        if row[1] not in (None, owner):
+                            break
+                        if ident not in resolved:
+                            resolved.append(ident)
+                        break
+                    replacement = db.execute(
+                        "SELECT replacement FROM retirements WHERE scope=? AND node=?",
+                        (scope, ident),
+                    ).fetchone()
+                    if not replacement or not replacement[0]:
+                        break
+                    ident = replacement[0]
+                else:
+                    row = None
                 if row is None or not row[0] or row[1] not in (None, owner):
                     raise ValueError("input_already_compacted_or_reserved")
                 db.execute(
                     "UPDATE nodes SET reservation=? WHERE scope=? AND id=?",
                     (owner, scope, ident),
                 )
+        return resolved
 
     def release(self, owner):
         with self.connection(True) as db:

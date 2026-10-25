@@ -1,7 +1,7 @@
 name: astrbot_plugin_lcm
 display_name: LCM 上下文与历史
 desc: 统一提示来源与有效历史，完整存档、分层压缩、历史图片预算及原图查回。
-version: v0.6.2
+version: v0.6.3
 author: littleApricot
 repo: https://github.com/littleApricot/astrbot_plugin_lcm
 astrbot_version: ">=4.29.1,<4.30.0"

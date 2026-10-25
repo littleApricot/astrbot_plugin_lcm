@@ -419,6 +419,10 @@ class HistoryBridge:
         if not state or state.get("owner") is not self.owner:
             return
         await self.refresh(state["origin"], state["cid"], event)
+        if not state.get("run"):
+            state["inputs"] = self.owner.store.reserve(
+                state["scope"], state["inputs"], state["reservation"]
+            )
         base = getattr(self.owner, "view", self.owner.store.view)(
             state["scope"], exclude=state["inputs"]
         )

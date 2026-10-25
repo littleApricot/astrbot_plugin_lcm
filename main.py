@@ -452,7 +452,7 @@ class LCM(Star):
         if current["id"] not in inputs:
             inputs.append(current["id"])
         reservation = uuid4().hex
-        self.store.reserve(scope, inputs, reservation)
+        inputs = self.store.reserve(scope, inputs, reservation)
         base = self.view(scope, exclude=inputs)
         req.contexts = self.messages(base["nodes"])
         # Earlier members are fresh round input, not part of the fixed history base.
