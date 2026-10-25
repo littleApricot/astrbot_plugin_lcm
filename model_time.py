@@ -53,24 +53,21 @@ def model_times(value, zone, key=""):
     return EN_ZONE_LABEL.sub("", ZONE_LABEL.sub("", ISO_TIME.sub(replace, value)))
 
 
-def history_message(message, node, zone):
-    """Add a known output time to assistant history, without inventing old times."""
+def history_message(message, zone):
+    """Keep assistant history as reply text; time remains in archive metadata."""
     message = model_times(copy.deepcopy(message), zone)
-    if (
-        message.get("role") != "assistant"
-        or not node
-        or node.get("level")
-        or node.get("payload", {}).get("extra", {}).get("time_unknown")
-    ):
+    if message.get("role") != "assistant":
         return message
     content = message.get("content")
-    prefix = "[" + local_time(node["timestamp"], zone) + " 机器人] "
-    if isinstance(content, str) and content.strip() and not LOCAL_STAMP.match(content):
-        message["content"] = prefix + content
+    if isinstance(content, str):
+        while match := LOCAL_STAMP.match(content):
+            content = content[match.end() :]
+        message["content"] = content
     elif isinstance(content, list):
         for part in content:
             if part.get("type") == "text" and part.get("text", "").strip():
-                if not LOCAL_STAMP.match(part["text"]):
-                    part["text"] = prefix + part["text"]
-                break
+                while match := LOCAL_STAMP.match(part["text"]):
+                    part["text"] = part["text"][match.end() :]
+                if part["text"].strip():
+                    break
     return message

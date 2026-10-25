@@ -13,7 +13,7 @@ from astrbot.core.provider.entities import ProviderRequest
 
 from astrbot_plugin_lcm.history_bridge import HistoryBridge
 from astrbot_plugin_lcm.main import HistoryTool, timestamp
-from astrbot_plugin_lcm.model_time import model_times
+from astrbot_plugin_lcm.model_time import history_message, model_times
 from astrbot_plugin_lcm.tests import test_integration
 from astrbot_plugin_reply_gate.decision_input import build_input
 
@@ -38,7 +38,7 @@ def test_zone_conversion_keeps_local_clock_without_zone_names():
 
 
 @pytest.mark.asyncio
-async def test_timestamp_saved_in_native_sqlite_and_reused_for_model_history(
+async def test_assistant_body_saved_without_stamp_and_archive_keeps_time(
     owner, tmp_path
 ):
     db = SQLiteDatabase(str(tmp_path / "native.db"))
@@ -55,23 +55,62 @@ async def test_timestamp_saved_in_native_sqlite_and_reused_for_model_history(
     try:
         await manager.update_conversation("group", cid, history=[raw])
         actual = json.loads((await manager.get_conversation("group", cid)).history)
-        assert re.match(
-            r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} 机器人\] 实际机器人输出$",
-            actual[0]["content"],
-        )
+        assert actual == [raw]
         assert owner.messages(owner.view(scope)["nodes"]) == actual
         assert owner.store.node(scope, ident)["payload"]["message"] == raw
-        # Re-saving and appending a parallel tail must not duplicate the stamp.
+        assert owner.store.node(scope, ident)["timestamp"] == 1792869080
+        # Existing saved stamps disappear from the model view and the next save.
+        stamped = {
+            "role": "assistant",
+            "content": "[2026-10-25 03:11:20 机器人] 实际机器人输出",
+        }
+        await bridge.original("group", cid, history=[stamped])
+        await bridge.refresh("group", cid)
+        assert owner.messages(owner.view(scope)["nodes"]) == [raw]
         tail = {"role": "assistant", "content": "并行输出"}
         owner.store.append(scope, tail, timestamp=1792869081)
-        await manager.update_conversation("group", cid, history=[*actual, tail])
+        await manager.update_conversation("group", cid, history=[stamped, tail])
         saved = json.loads((await manager.get_conversation("group", cid)).history)
         assert len(saved) == 2 and saved[0] == actual[0]
-        assert saved[1]["content"].count("机器人]") == 1
+        assert saved[1] == tail
         assert owner.messages(owner.view(scope)["nodes"]) == saved
+        assert owner.store.node(scope, ident)["payload"]["message"] == raw
     finally:
         bridge.close()
         await db.engine.dispose()
+
+
+@pytest.mark.parametrize("structured", [False, True])
+def test_remove_only_internal_leading_assistant_stamp_in_detached_history(structured):
+    stamp = "[2026-10-25 14:43:31 机器人] "
+    text = stamp + stamp + "正文保留日期 2026-10-25，以及引用：“" + stamp + "原话”"
+    content = (
+        [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+            {"type": "text", "text": text},
+        ]
+        if structured
+        else text
+    )
+    raw = {"role": "assistant", "content": content, "tool_calls": [{"id": "unchanged"}]}
+    before = copy.deepcopy(raw)
+    cleaned = history_message(raw, ZoneInfo("Asia/Shanghai"))
+    body = cleaned["content"][1]["text"] if structured else cleaned["content"]
+    assert body == text[len(stamp) * 2 :]
+    assert raw == before and cleaned["tool_calls"] == raw["tool_calls"]
+    if structured:
+        assert cleaned["content"][0] == raw["content"][0]
+    assert (
+        history_message(
+            {"role": "user", "content": stamp + "用户原话"}, ZoneInfo("Asia/Shanghai")
+        )["content"]
+        == stamp + "用户原话"
+    )
+    ordinary = {
+        "role": "assistant",
+        "content": "2026-10-25 再见；[2026-10-25 14:43:31 小幸] 原话",
+    }
+    assert history_message(ordinary, ZoneInfo("Asia/Shanghai")) == ordinary
 
 
 @pytest.mark.asyncio

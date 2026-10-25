@@ -147,7 +147,7 @@ class LCM(Star):
         return ZoneInfo(config.get("timezone", "Asia/Shanghai") or "Asia/Shanghai")
 
     def saved_history(self, scope, messages, candidates):
-        """Persist the same dated message view used for subsequent model calls."""
+        """Persist the same message view used for subsequent model calls."""
         aliases = defaultdict(list)
         for candidate in candidates:
             choices = aliases[history_key(candidate["message"])]
@@ -158,8 +158,7 @@ class LCM(Star):
         for message in messages:
             choices = aliases[history_key(message)]
             ident = next((item for item in choices if item not in used), None)
-            node = self.store.node(scope, ident) if ident else None
-            projected = history_message(message, node, zone)
+            projected = history_message(message, zone)
             result.append(projected)
             if ident:
                 used.add(ident)
@@ -178,7 +177,7 @@ class LCM(Star):
             scope = node["scope"]
             if scope not in zones:
                 zones[scope] = self.time_zone(scope)
-            message = history_message(message, node, zones[scope])
+            message = history_message(message, zones[scope])
             if node.get("_tool_record_reason") and (
                 message.get("role") == "tool" or message.get("tool_calls")
             ):
