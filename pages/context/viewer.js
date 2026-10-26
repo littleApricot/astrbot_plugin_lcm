@@ -1,6 +1,6 @@
 'use strict';
 const $ = id => document.getElementById(id);
-const state = {scope:'', mode:'context', cursor:'', searching:false, query:'', trail:[], generation:0, viewVersion:null, snapshot:null, sessions:[], saved:null, runOffset:0, timezone:'Asia/Shanghai'};
+const state = {scope:'', mode:'context', cursor:'', searching:false, query:'', trail:[], generation:0, viewVersion:null, snapshot:null, sessions:[], saved:null, runOffset:0, timezone:'Asia/Shanghai',resetting:false};
 const labels = {queued:'等待压缩',running:'压缩中',ready:'等待发布',complete:'已发布',retry:'等待重试',conflict:'来源已变化',failed:'失败',cancelled:'已取消',interrupted:'已中断',legacy_inferred:'旧历史 · 轮次为推断'};
 const size = n => Number(n||0).toLocaleString('zh-CN');
 function element(tag,text,cls){const el=document.createElement(tag);if(text!==undefined)el.textContent=text;if(cls)el.className=cls;return el;}
@@ -71,13 +71,16 @@ function setMore(cursor,callback){state.cursor=cursor||'';$('more').hidden=!curs
 async function sessions(){
   try{const data=await api('sessions');state.sessions=data.sessions;$('budget').textContent='分层基准 B = '+size(data.base_tokens)+' tokens（估算）';
     $('sessions').replaceChildren();
-    for(const s of data.sessions){const b=element('button',undefined,'session'+(s.id===state.scope?' active':''));b.append(element('strong',s.title),element('small',s.cid.slice(0,12)+' · '+size(s.records)+' 条原文'));b.onclick=()=>selectSession(s.id);$('sessions').append(b);}
+    for(const s of data.sessions){const b=element('button',undefined,'session'+(s.id===state.scope?' active':''));b.append(element('strong',s.title),element('small',s.cid.slice(0,12)+' · '+size(s.records)+' 条原文 · '+(s.current?'当前使用':'历史存档')));b.disabled=state.resetting;b.onclick=()=>selectSession(s.id);$('sessions').append(b);}
+    updateResetButton();
     if(!data.sessions.length){$('stream').replaceChildren(empty('历史从下一条消息开始','插件启用后，收到的消息和完整回复会出现在这里。'));notice('尚无已归档会话。');}
     else if(!state.scope)await selectSession(data.sessions[0].id);
   }catch(e){notice(e.message,true);$('stream').replaceChildren(empty('暂时无法读取','请确认插件已加载，并从 AstrBot 的插件页面打开。'));}
 }
-async function selectSession(id){
-  state.scope=id;state.searching=false;state.snapshot=null;state.saved=null;state.query='';$('query').value='';$('sidebar').classList.remove('open');closeInspector();
+function updateResetButton(){const current=state.sessions.find(s=>s.id===state.scope);$('reset-context').disabled=state.resetting||!current?.current;$('reset-context').title=current?.current?'新建空白聊天上下文，旧记录保留；长期记忆和记事本继续使用。':'请选择正在使用的会话。';}
+async function selectSession(id,force=false){
+  if(state.resetting&&!force)return;
+  state.scope=id;state.viewVersion=null;updateResetButton();state.searching=false;state.snapshot=null;state.saved=null;state.query='';$('query').value='';$('sidebar').classList.remove('open');closeInspector();
   for(const [index,b] of [...$('sessions').children].entries())b.classList.toggle('active',state.sessions[index].id===id);
   const session=state.sessions.find(s=>s.id===id);state.timezone=session.timezone||'Asia/Shanghai';$('session-name').textContent=session.title+' · '+session.cid+' · '+state.timezone;
   $('start').title=$('end').title='按机器人时区 '+state.timezone+' 筛选';
@@ -151,6 +154,14 @@ for(const b of document.querySelectorAll('[data-mode]'))b.onclick=async()=>{stat
 $('search-form').onsubmit=async event=>{event.preventDefault();const query=$('query').value.trim();if(!query){state.searching=false;await load();return;}state.query=query;state.searching=true;if(state.mode==='request'&&state.snapshot)renderSnapshot();else await load();};
 $('filter-toggle').onclick=()=>{$('filters').hidden=!$('filters').hidden;};
 $('run').onchange=()=>loadSteps().catch(e=>notice(e.message,true));$('step').onchange=loadRequest;
+$('reset-context').onclick=async()=>{
+ const session=state.sessions.find(s=>s.id===state.scope);if(state.resetting||!session?.current)return;
+ if(!confirm('重置这个会话的 Context？将新建空白聊天上下文，停止本会话正在处理的回复。旧聊天与摘要保留，长期记忆和记事本继续使用。'))return;
+ state.resetting=true;state.generation++;updateResetButton();$('refresh').disabled=true;for(const b of $('sessions').children)b.disabled=true;notice('正在重置聊天上下文…');
+ try{const bridge=window.AstrBotPluginPage;const response=await bridge.apiPost('reset',{scope:session.id});if(response?.status==='error')throw Error(response.message||'重置失败');const result=response?.status==='ok'||response?.status==='success'?response.data:response;
+  state.scope='';state.mode='context';$('requestbar').hidden=true;$('jobs-panel').hidden=false;$('back').hidden=true;for(const b of document.querySelectorAll('[data-mode]'))b.classList.toggle('active',b.dataset.mode==='context');await sessions();await selectSession(result.scope,true);notice('Context 已重置。新对话从空白聊天上下文开始，长期记忆和记事本继续使用；旧会话保留在左侧。');
+ }catch(e){state.resetting=false;await sessions();notice(e.message,true);}finally{state.resetting=false;$('refresh').disabled=false;for(const b of $('sessions').children)b.disabled=false;updateResetButton();}
+};
 $('refresh').onclick=async()=>{await sessions();await load();};$('close-inspector').onclick=closeInspector;
 $('nav').onclick=()=>$('sidebar').classList.add('open');$('close-nav').onclick=()=>$('sidebar').classList.remove('open');
 function theme(value){document.documentElement.dataset.theme=value==='dark'?'dark':'light';}

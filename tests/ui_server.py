@@ -1,4 +1,4 @@
-"""Serve disposable fixtures through actual read-only plugin handlers."""
+"""Serve disposable fixtures through actual plugin viewing/reset handlers."""
 
 import copy
 import sys
@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from uuid import uuid4
 
 import uvicorn
 from astrbot.api.web import PluginRequest, bind_request_context
@@ -16,6 +17,27 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from astrbot_plugin_lcm.main import LCM
 
 folder = tempfile.TemporaryDirectory(prefix="lcm-isolated-ui-")
+
+
+class Conversations:
+    def __init__(self):
+        self.current = {
+            "QQ 讨论群 · 小比的日常": "viewer-demo",
+            "另一个群 · 读书闲聊": "separate-session",
+        }
+
+    async def get_curr_conversation_id(self, origin):
+        return self.current.get(origin)
+
+    async def get_conversation(self, origin, cid):
+        return SimpleNamespace(persona_id="fixture-persona", history="[]")
+
+    async def new_conversation(self, origin, **kwargs):
+        self.current[origin] = uuid4().hex
+        return self.current[origin]
+
+
+conversations = Conversations()
 with patch(
     "astrbot_plugin_lcm.main.StarTools.get_data_dir", return_value=Path(folder.name)
 ):
@@ -24,6 +46,8 @@ with patch(
             register_web_api=lambda *a: None,
             add_llm_tools=lambda *a: None,
             get_config=lambda **k: {"timezone": "Asia/Shanghai"},
+            conversation_manager=conversations,
+            get_all_stars=lambda: [],
         ),
         {"base_tokens": 40},
     )
@@ -119,14 +143,18 @@ page_service = PluginPageService(
 )
 
 
-@app.get("/api/{endpoint}")
-@app.get("/api/v1/plugins/extensions/astrbot_plugin_lcm/{endpoint}")
+@app.api_route("/api/{endpoint}", methods=["GET", "POST"])
+@app.api_route(
+    "/api/v1/plugins/extensions/astrbot_plugin_lcm/{endpoint}", methods=["GET", "POST"]
+)
 async def api(endpoint: str, request: Request):
     with bind_request_context(
         PluginRequest(
             request, plugin_name="astrbot_plugin_lcm", username="isolated-test"
         )
     ):
+        if request.method == "POST" and endpoint == "reset":
+            return await plugin.api_reset()
         return await plugin.api()
 
 
@@ -168,8 +196,8 @@ window.addEventListener('message',async event=>{
  const send=data=>frame.contentWindow.postMessage({channel:'astrbot-plugin-page',...data},location.origin);
  if(m.kind==='ready')send({kind:'context',context:{pluginName:'astrbot_plugin_lcm',locale:'zh-CN',isDark:false}});
  if(m.kind==='request')try{
-  if(m.action!=='api:get'||!/^[a-z]+$/.test(m.endpoint))throw Error('invalid fixture API request');
-  const response=await fetch('/api/v1/plugins/extensions/astrbot_plugin_lcm/'+m.endpoint+'?'+new URLSearchParams(m.params||{}));
+  if(!['api:get','api:post'].includes(m.action)||!/^[a-z]+$/.test(m.endpoint))throw Error('invalid fixture API request');
+  const response=m.action==='api:get'?await fetch('/api/v1/plugins/extensions/astrbot_plugin_lcm/'+m.endpoint+'?'+new URLSearchParams(m.params||{})):await fetch('/api/v1/plugins/extensions/astrbot_plugin_lcm/'+m.endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(m.body||{})});
   const data=await response.json();if(!response.ok)throw Error(data.message||'API failed');
   send({kind:'response',requestId:m.requestId,ok:true,data});
  }catch(e){send({kind:'response',requestId:m.requestId,ok:false,error:e.message});}

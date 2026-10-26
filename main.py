@@ -1,4 +1,4 @@
-"""Layered context management and a read-only provenance viewer for AstrBot."""
+"""Layered context management, archival viewing and conversation reset."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import time
 from collections import defaultdict
 from datetime import datetime
 from sys import maxsize
+from types import SimpleNamespace
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -18,6 +19,7 @@ from astrbot.api.message_components import File, Image, Record, Video
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.api.web import error_response, json_response, request
 from astrbot.core.agent.tool import FunctionTool, ToolSet
+from astrbot.core.utils.active_event_registry import active_event_registry
 from mcp.types import CallToolResult, ImageContent, TextContent
 
 from .bridge import RunnerBridge, plain
@@ -257,6 +259,60 @@ class LCM(Star):
                 ["GET"],
                 "LCM context and history",
             )
+        self.context.register_web_api(
+            "/astrbot_plugin_lcm/reset", self.api_reset, ["POST"], "Reset chat context"
+        )
+
+    async def reset_context(self, scope):
+        session = next((s for s in self.store.scopes() if s["id"] == scope), None)
+        if session is None:
+            raise ValueError("会话不存在，请刷新页面")
+        origin = session["origin"]
+        async with self.scope_locks.setdefault(origin, asyncio.Lock()):
+            manager = self.context.conversation_manager
+            current = await manager.get_curr_conversation_id(origin)
+            if str(current) != session["cid"]:
+                raise ValueError("当前对话已变化，请刷新后选择正在使用的会话")
+            conversation = await manager.get_conversation(origin, current)
+            stopped = active_event_registry.stop_all(origin)
+            # The native /new command clears this same pending group context.
+            for star in self.context.get_all_stars():
+                instance = getattr(star, "star_cls", None)
+                if type(instance).__module__ == "astrbot.builtin_stars.astrbot.main":
+                    group = getattr(instance, "group_chat_context", None)
+                    if group is not None:
+                        await group.remove_session(
+                            SimpleNamespace(unified_msg_origin=origin)
+                        )
+            cid = await manager.new_conversation(
+                origin, persona_id=getattr(conversation, "persona_id", None)
+            )
+            fresh = self.store.scope(origin, str(cid), session["title"])
+            self.store.import_history(fresh, [])
+        return {
+            "scope": fresh,
+            "previous_scope": scope,
+            "cid": str(cid),
+            "stopped": stopped,
+        }
+
+    async def api_reset(self):
+        if getattr(self, "_terminated", False):
+            return error_response("插件已停用，请刷新页面", status_code=503)
+        try:
+            payload = await request.json()
+            if (
+                not isinstance(payload, dict)
+                or set(payload) != {"scope"}
+                or not isinstance(payload["scope"], str)
+            ):
+                raise ValueError("请指定要重置的当前会话")
+            return json_response(await self.reset_context(payload["scope"]))
+        except (ValueError, TypeError, KeyError) as exc:
+            return error_response(str(exc), status_code=400)
+        except Exception:
+            self.logger.exception("LCM 重置聊天上下文失败")
+            return error_response("重置失败，请检查后台日志后刷新页面", status_code=500)
 
     def history_tools(self):
         """Declare session-resolving tools for AstrBot's shared registry."""
@@ -722,7 +778,16 @@ class LCM(Star):
             q = request.query
             if endpoint == "sessions":
                 sessions = self.store.scopes()
+                currents = {}
                 for session in sessions:
+                    origin = session["origin"]
+                    if origin not in currents:
+                        currents[
+                            origin
+                        ] = await self.context.conversation_manager.get_curr_conversation_id(
+                            origin
+                        )
+                    session["current"] = session["cid"] == str(currents[origin])
                     get_config = getattr(self.context, "get_config", lambda **k: {})
                     session["timezone"] = get_config(umo=session["origin"]).get(
                         "timezone", "Asia/Shanghai"
