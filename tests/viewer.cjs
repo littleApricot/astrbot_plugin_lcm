@@ -60,7 +60,7 @@ const {chromium}=require('playwright');
   await view.locator('#nav').click();assert.ok(await view.locator('#sidebar').evaluate(e=>e.classList.contains('open')));
   await view.locator('#close-nav').click();
   console.log('mobile-overflow',await view.evaluate(()=>({w:innerWidth,scroll:document.documentElement.scrollWidth,wide:[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1).slice(0,10).map(e=>[e.tagName,e.className,e.id,Math.round(e.getBoundingClientRect().width)])})));
-  assert.equal(await view.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  assert.equal(await view.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);assert.ok(await view.locator('h1').evaluate(node=>node.getBoundingClientRect().height<50));
   await page.screenshot({path:(process.env.LCM_SCREENSHOT_DIR||process.cwd())+'/preview-mobile.png',fullPage:false});
   await page.setViewportSize({width:1440,height:1000});
   const previous=await view.evaluate(()=>state.scope);assert.equal(await view.locator('#reset-context').isEnabled(),true);
