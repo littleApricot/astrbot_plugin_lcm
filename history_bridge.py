@@ -423,9 +423,14 @@ class HistoryBridge:
             state["inputs"] = self.owner.store.reserve(
                 state["scope"], state["inputs"], state["reservation"]
             )
-        base = getattr(self.owner, "view", self.owner.store.view)(
-            state["scope"], exclude=state["inputs"]
-        )
+        base = state.get("frozen_base")
+        if base is None:
+            options = {"include_pending": False} if state.get("isolate_batch") else {}
+            base = getattr(self.owner, "view", self.owner.store.view)(
+                state["scope"], exclude=state["inputs"], **options
+            )
+            if state.get("isolate_batch"):
+                state["frozen_base"] = copy.deepcopy(base)
         state["base"] = base
         req.contexts = self.owner.messages(base["nodes"])
         batch = event.get_extra("reply_gate_batch")
@@ -439,9 +444,11 @@ class HistoryBridge:
         old = runner.run_context.messages
         tail = old[state["offset"] :]
         excluded = [*state["inputs"], *state["output_ids"]]
-        base = getattr(self.owner, "view", self.owner.store.view)(
-            state["scope"], exclude=excluded
-        )
+        base = state.get("frozen_base")
+        if base is None:
+            base = getattr(self.owner, "view", self.owner.store.view)(
+                state["scope"], exclude=excluded
+            )
         systems = old[:1] if old and old[0].role == "system" else []
         inputs = [value for _, value in reversed(state["input_messages"])]
         prefix = (

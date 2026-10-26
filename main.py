@@ -203,8 +203,8 @@ class LCM(Star):
             result.append(node)
         return result
 
-    def view(self, scope, exclude=()):
-        view = self.store.view(scope, exclude)
+    def view(self, scope, exclude=(), *, include_pending=True):
+        view = self.store.view(scope, exclude, include_pending=include_pending)
         view["nodes"] = self.model_nodes(view["nodes"])
         view["tokens"] = {}
         for node in view["nodes"]:
@@ -467,6 +467,7 @@ class LCM(Star):
                 or uuid4().hex
             )
             event.set_extra("lcm_source_id", source)
+            pending_owner = "incoming:" + uuid4().hex
             mid = self.store.append(
                 scope,
                 {"role": "user", "content": content},
@@ -474,8 +475,23 @@ class LCM(Star):
                 sender=sender,
                 timestamp=stamp,
                 extra={"components": components, "platform_id": source},
+                reservation=pending_owner,
             )
             event.set_extra("lcm_input", {"scope": scope, "id": mid})
+            # Archive immediately, but keep an unclaimed event out of another
+            # batch's input and out of background compaction until admission.
+            if not event.get_extra("lcm_pending_owner"):
+                event.set_extra("lcm_pending_owner", pending_owner)
+                cleanup = event.cleanup_temporary_local_files
+
+                def release_pending():
+                    try:
+                        cleanup()
+                    finally:
+                        self.store.release(pending_owner)
+                        self.wake.set()
+
+                event.cleanup_temporary_local_files = release_pending
         history = getattr(self, "history_bridge", None)
         if history:
             history.bind(event)
@@ -514,17 +530,23 @@ class LCM(Star):
                 for message, sibling in zip(batch.past_messages, siblings, strict=True)
             ]
         inputs = []
+        pending_owners = []
         for member in batch.members if batch is not None else []:
             source = member.event.get_extra("lcm_input")
             if source and source["scope"] == scope:
                 inputs.append(source["id"])
+                pending_owners.append(member.event.get_extra("lcm_pending_owner"))
         if current["scope"] != scope:
             raise ValueError("LCM conversation changed during input preparation")
         if current["id"] not in inputs:
             inputs.append(current["id"])
         reservation = uuid4().hex
-        inputs = self.store.reserve(scope, inputs, reservation)
-        base = self.view(scope, exclude=inputs)
+        pending_owners.append(event.get_extra("lcm_pending_owner"))
+        inputs = self.store.reserve(
+            scope, inputs, reservation, previous_owners=pending_owners
+        )
+        isolate_batch = bool(getattr(batch, "freeze_context", False))
+        base = self.view(scope, exclude=inputs, include_pending=not isolate_batch)
         req.contexts = self.messages(base["nodes"])
         # Earlier members are fresh round input, not part of the fixed history base.
         if batch is not None:
@@ -538,6 +560,7 @@ class LCM(Star):
             "request": req,
             "origin": event.unified_msg_origin,
             "cid": req.conversation.cid,
+            "isolate_batch": isolate_batch,
         }
         event.set_extra("lcm_prepared", state)
         cleanup = event.cleanup_temporary_local_files

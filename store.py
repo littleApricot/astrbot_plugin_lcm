@@ -186,6 +186,7 @@ class Store:
         round_id=None,
         extra=None,
         tokens=None,
+        reservation=None,
     ):
         payload = {"message": message, "extra": extra or {}}
         with self.connection(True) as db:
@@ -199,7 +200,7 @@ class Store:
             ident = "m_" + uuid4().hex
             cur = db.execute(
                 """INSERT INTO nodes(id,scope,level,kind,payload,tokens,round_id,
-                source_key,sender,timestamp,received) VALUES(?,?,0,'raw',?,?,?,?,?,?,?)""",
+                source_key,sender,timestamp,received,reservation) VALUES(?,?,0,'raw',?,?,?,?,?,?,?,?)""",
                 (
                     ident,
                     scope,
@@ -210,6 +211,7 @@ class Store:
                     sender,
                     timestamp or time.time(),
                     time.time(),
+                    reservation,
                 ),
             )
             db.execute("UPDATE nodes SET lo=seq,hi=seq WHERE seq=?", (cur.lastrowid,))
@@ -861,7 +863,7 @@ class Store:
                 )
         return ordered_history_nodes(nodes, inactive)
 
-    def view(self, scope, exclude=()):
+    def view(self, scope, exclude=(), *, include_pending=True):
         with self.connection() as db:
             state = db.execute("SELECT * FROM scopes WHERE id=?", (scope,)).fetchone()
             if state is None:
@@ -869,8 +871,10 @@ class Store:
             nodes = [
                 self.node(scope, r[0], db)
                 for r in db.execute(
-                    "SELECT id FROM nodes WHERE scope=? AND active=1 ORDER BY lo,seq",
-                    (scope,),
+                    "SELECT id FROM nodes WHERE scope=? AND active=1 "
+                    "AND (? OR reservation IS NULL OR reservation NOT LIKE 'incoming:%') "
+                    "ORDER BY lo,seq",
+                    (scope, include_pending),
                 )
                 if r[0] not in exclude
             ]
@@ -894,9 +898,10 @@ class Store:
                 "jobs": jobs,
             }
 
-    def reserve(self, scope, ids, owner):
+    def reserve(self, scope, ids, owner, *, previous_owners=()):
         """Reserve current input versions while keeping their original IDs traceable."""
         resolved = []
+        allowed = {None, owner, *previous_owners}
         with self.connection(True) as db:
             for ident in ids:
                 visited = set()
@@ -909,7 +914,7 @@ class Store:
                     if row is None:
                         break
                     if row[0]:
-                        if row[1] not in (None, owner):
+                        if row[1] not in allowed:
                             break
                         if ident not in resolved:
                             resolved.append(ident)
@@ -923,7 +928,7 @@ class Store:
                     ident = replacement[0]
                 else:
                     row = None
-                if row is None or not row[0] or row[1] not in (None, owner):
+                if row is None or not row[0] or row[1] not in allowed:
                     raise ValueError("input_already_compacted_or_reserved")
                 db.execute(
                     "UPDATE nodes SET reservation=? WHERE scope=? AND id=?",
