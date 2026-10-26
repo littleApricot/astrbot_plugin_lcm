@@ -141,7 +141,7 @@ async def test_minimal_runtime_and_judge_metadata_without_tool_guidance(owner):
     owner.context_rules().configure_request(event, request)
     temporary = owner.context_rules().temporary(event)
     assert (
-        "当前时间：" in temporary
+        "时间：" in temporary
         and "User ID" not in temporary
         and "Nickname" not in temporary
     )

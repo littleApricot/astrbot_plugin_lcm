@@ -12,6 +12,9 @@ from astrbot.core.astr_main_agent_resources import (
     TOOL_CALL_PROMPT_SKILLS_LIKE_MODE,
 )
 
+from .runtime_clock import runtime_time
+from .user_message import event_message
+
 BLOCKED_TOOLS = {"oauth-status", "oauth-logout", "protect-page"}
 SYSTEM_START = "[系统提示｜来源：{owner}]"
 TEMP_START = "[本轮临时提示｜来源：{owner}]"
@@ -105,7 +108,7 @@ class ContextRules:
         return [message for _, message in self.history_entries(messages)]
 
     def configure_request(self, event, req):
-        # Replace native identity/clock reminders with the minimal runtime block.
+        # Put sender/event time on the message; current time stays in runtime hints.
         kept = []
         for part in req.extra_user_content_parts or []:
             value = part if isinstance(part, dict) else part.model_dump()
@@ -124,6 +127,13 @@ class ContextRules:
                     continue
             kept.append(part)
         req.extra_user_content_parts = kept
+        config = getattr(self.owner.context, "get_config", lambda **kwargs: {})(
+            umo=event.unified_msg_origin
+        )
+        zone = ZoneInfo(config.get("timezone", "Asia/Shanghai") or "Asia/Shanghai")
+        req.prompt = event_message(
+            {"role": "user", "content": req.prompt or ""}, event, zone
+        )["content"]
         req.system_prompt = self.system(event, req.system_prompt or "")
         if req.func_tool is not None:
             req.func_tool = copy.copy(req.func_tool)
@@ -163,7 +173,7 @@ class ContextRules:
         )
         zone = ZoneInfo(config.get("timezone", "Asia/Shanghai") or "Asia/Shanghai")
         current = datetime.now(zone)
-        runtime = "当前时间：" + current.strftime("%Y-%m-%d %H:%M:%S")
+        runtime = runtime_time(current)
         records = [("astrbot.runtime", runtime)]
         for declaration in self.declarations():
             value = declaration.get("temporary", "")

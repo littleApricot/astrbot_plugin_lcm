@@ -30,6 +30,7 @@ from .image_context import ImageContext
 from .media import MediaArchive
 from .model_time import history_message, local_time, model_times
 from .store import Store, encode
+from .user_message import event_message, node_message, user_message
 
 SUMMARY_PROMPT = """将所给有效聊天历史写成可继续聊天的中性历史摘要，使用中文。
 保留话题、称呼和关系、事实、约定、纠正、未解决事项、必要时间及工具结论；
@@ -161,6 +162,11 @@ class LCM(Star):
             choices = aliases[history_key(message)]
             ident = next((item for item in choices if item not in used), None)
             projected = history_message(message, zone)
+            projected = (
+                node_message(projected, self.store.node(scope, ident), zone)
+                if ident
+                else user_message(projected, zone)
+            )
             result.append(projected)
             if ident:
                 used.add(ident)
@@ -180,6 +186,7 @@ class LCM(Star):
             if scope not in zones:
                 zones[scope] = self.time_zone(scope)
             message = history_message(message, zones[scope])
+            message = node_message(message, node, zones[scope])
             if node.get("_tool_record_reason") and (
                 message.get("role") == "tool" or message.get("tool_calls")
             ):
@@ -497,6 +504,15 @@ class LCM(Star):
         if history:
             await history.refresh(event.unified_msg_origin, req.conversation.cid, event)
         batch = event.get_extra("reply_gate_batch")
+        if batch is not None:
+            zone = self.time_zone(scope)
+            siblings = [
+                member.event for member in batch.members if member is not batch.owner
+            ]
+            batch.past_messages = [
+                event_message(message, sibling, zone)
+                for message, sibling in zip(batch.past_messages, siblings, strict=True)
+            ]
         inputs = []
         for member in batch.members if batch is not None else []:
             source = member.event.get_extra("lcm_input")

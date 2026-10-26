@@ -141,7 +141,13 @@ class ImageContext:
                         "type": "text",
                         "text": await self.description(part.get("image_url", "")),
                     }
-            if has_image and node:
+            human_message = message.get("role") == "user" and any(
+                isinstance(part, dict)
+                and part.get("type") == "text"
+                and part.get("text", "").startswith("发送人：")
+                for part in content
+            )
+            if has_image and node and not human_message:
                 ids = [item["id"] for item in media]
                 content.append(
                     {
