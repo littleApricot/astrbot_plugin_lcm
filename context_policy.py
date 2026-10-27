@@ -57,6 +57,7 @@ class ContextRules:
                     for name in (
                         "astrbot_plugin_self_prompt",
                         "astrbot_plugin_meme_library",
+                        "astrbot_plugin_silence",
                     )
                 ]
         declarations, seen = [], set()

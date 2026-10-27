@@ -237,6 +237,7 @@ class RunnerBridge:
                 owner.wake.set()
 
             async def step(self):
+                step_failed = False
                 try:
                     if history:
                         await history.rebase(event, state)
@@ -244,6 +245,7 @@ class RunnerBridge:
                         capture()
                         yield result
                 except BaseException as exc:
+                    step_failed = True
                     capture()
                     owner.store.finish(
                         state["run"],
@@ -256,13 +258,14 @@ class RunnerBridge:
                     raise
                 finally:
                     capture()
-                    if runner.done():
+                    if runner.done() and not step_failed:
                         final = runner.get_final_llm_resp()
                         status = (
                             "cancelled"
                             if runner.was_aborted()
                             else "complete"
-                            if final and final.role == "assistant"
+                            if (final and final.role == "assistant")
+                            or event.get_extra("silence_completed", False)
                             else "failed"
                         )
                         owner.store.finish(
