@@ -12,6 +12,7 @@ from astrbot.core.agent.tool import ToolSet
 
 from .image_context import ImageContext
 from .model_time import model_times
+from .tool_instructions import tool_view
 
 
 def plain(value):
@@ -122,6 +123,11 @@ class ProviderView:
             from astrbot.core.agent.message import Message
 
             rules = self._owner.context_rules()
+            available = kwargs.get("func_tool")
+            instructions, call_tools = tool_view(
+                available, self._state.get("tool_catalog", available)
+            )
+            kwargs = {**kwargs, "func_tool": call_tools}
             if values and plain(values[0]).get("role") == "system":
                 value = plain(values[0])
                 content = value.get("content", "")
@@ -134,12 +140,26 @@ class ProviderView:
                         if isinstance(part, dict)
                     )
                 )
-                value["content"] = rules.system(event, text)
+                value["content"] = rules.system(event, text, instructions)
                 values[0] = (
                     value
                     if isinstance(values[0], dict)
                     else type(values[0]).model_validate(value)
                 )
+            else:
+                value = {
+                    "role": "system",
+                    "content": rules.system(
+                        event, kwargs.get("system_prompt", ""), instructions
+                    ),
+                }
+                values.insert(
+                    0,
+                    value
+                    if not values or isinstance(values[0], dict)
+                    else Message.model_validate(value),
+                )
+                kwargs = {**kwargs, "system_prompt": ""}
             # Detached input only: this message never enters runner history or
             # native persistence. The request snapshot still records it.
             temporary = {"role": "user", "content": rules.temporary(event)}
@@ -186,6 +206,7 @@ class RunnerBridge:
                 None,
             )
             state = event.get_extra("lcm_prepared") if event is not None else None
+            tool_catalog = getattr(bound.arguments.get("request"), "func_tool", None)
             await bridge.original(runner, *args, **kwargs)
             if (
                 not state
@@ -201,6 +222,9 @@ class RunnerBridge:
             state["outputs"] = 0
             state["runner"] = runner
             state["event"] = event
+            # Preserve the full allowed catalog across skills-like subsets and
+            # the final no-tools request, so instructions do not change per step.
+            state["tool_catalog"] = tool_catalog
             history = getattr(owner, "history_bridge", None)
             if history:
                 await history.register(event, state)

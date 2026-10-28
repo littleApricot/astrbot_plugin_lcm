@@ -69,10 +69,12 @@ async def test_native_memory_preparation_declares_latest_catalog_separately(owne
         )
         assert created["ok"]
         temporary = rules.temporary(ev)
-        assert "流程" in temporary and "办事步骤" in temporary
+        assert "流程" not in temporary and "办事步骤" not in temporary
         assert "具体步骤" not in temporary
         assert "流程" not in req.system_prompt
         repeated = rules.system(ev, req.system_prompt)
+        assert "流程" in repeated and "办事步骤" in repeated
+        assert "具体步骤" not in repeated
         assert repeated.count("来源：astrbot_plugin_self_prompt") == 1
     finally:
         await sandbox.close()

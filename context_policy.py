@@ -136,17 +136,29 @@ class ContextRules:
             {"role": "user", "content": req.prompt or ""}, event, zone
         )["content"]
         req.system_prompt = self.system(event, req.system_prompt or "")
+        event.set_extra("lcm_request_system", req.system_prompt)
+        event.set_extra(
+            "lcm_request_system_base", event.get_extra("lcm_system_base", "")
+        )
         if req.func_tool is not None:
             req.func_tool = copy.copy(req.func_tool)
             req.func_tool.tools = [
                 tool for tool in req.func_tool.tools if tool.name not in BLOCKED_TOOLS
             ]
 
-    def system(self, event, raw):
+    def system(self, event, raw, tool_instructions=""):
         previous = event.get_extra("lcm_rendered_system", "")
         base = event.get_extra("lcm_system_base", "")
         if previous and previous in raw:
             raw = base + raw.replace(previous, "", 1)
+        else:
+            # The runner retains the initial system message. Later provider calls
+            # must refresh that rendering, even after tools changed the catalog.
+            initial = event.get_extra("lcm_request_system", "")
+            if initial and initial in raw:
+                raw = event.get_extra("lcm_request_system_base", "") + raw.replace(
+                    initial, "", 1
+                )
         raw = DISABLED_SKILLS.sub("", raw)
         for prompt in (TOOL_CALL_PROMPT, TOOL_CALL_PROMPT_SKILLS_LIKE_MODE):
             raw = raw.replace(prompt, "")
@@ -155,6 +167,8 @@ class ContextRules:
         records = []
         if raw:
             records.append(("astrbot.core/未声明来源", raw))
+        if tool_instructions:
+            records.append(("astrbot.tools", tool_instructions))
         for declaration in self.declarations():
             value = declaration.get("system", "")
             value = value(event) if callable(value) else value
