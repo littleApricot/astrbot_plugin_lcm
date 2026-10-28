@@ -16,15 +16,24 @@ from openai import AsyncOpenAI
 from astrbot_plugin_lcm.bridge import ProviderView, RunnerBridge, plain
 from astrbot_plugin_lcm.tests import test_integration
 from astrbot_plugin_lcm.tests.test_integration import FakeProvider, prepare, runner
-from astrbot_plugin_lcm.tool_instructions import tool_view
 from astrbot_plugin_meme_library.main import RECOMMENDATION_NOTE, MemeLibrary
 from astrbot_plugin_reply_gate.decision_input import build_input
 from astrbot_plugin_self_prompt.main import MEMORY_REMINDER
 from astrbot_plugin_self_prompt.tests.support import Sandbox
+from astrbot_plugin_tool_prompts.context_policy import PromptPolicy
 from astrbot_plugin_tool_prompts.descriptions import DescriptionStore, tool_id
+from astrbot_plugin_tool_prompts.main import ToolPrompts
 from astrbot_plugin_tool_prompts.schema_bridge import SchemaBridge
+from astrbot_plugin_tool_prompts.tool_instructions import tool_view
 
 owner = test_integration.owner
+
+
+def management(context):
+    plugin = object.__new__(ToolPrompts)
+    plugin.running = True
+    plugin.policy = PromptPolicy(context)
+    return plugin
 
 
 def tool(name="a_tool"):
@@ -124,6 +133,9 @@ async def test_tool_loop_refreshes_catalog_without_changing_manual_or_judge(owne
             "astrbot_plugin_self_prompt": SimpleNamespace(star_cls=sandbox.plugin),
             "astrbot_plugin_lcm": SimpleNamespace(star_cls=owner),
             "astrbot_plugin_meme_library": SimpleNamespace(star_cls=gallery),
+            "astrbot_plugin_tool_prompts": SimpleNamespace(
+                star_cls=management(owner.context)
+            ),
         }
         owner.context.get_all_stars = lambda: list(stars.values())
         owner.context.get_registered_star = stars.get
@@ -232,6 +244,14 @@ async def test_tool_loop_refreshes_catalog_without_changing_manual_or_judge(owne
 
 @pytest.mark.asyncio
 async def test_native_openai_payload_and_snapshot_agree(owner, tmp_path):
+    stars = {
+        "astrbot_plugin_lcm": SimpleNamespace(star_cls=owner),
+        "astrbot_plugin_tool_prompts": SimpleNamespace(
+            star_cls=management(owner.context)
+        ),
+    }
+    owner.context.get_registered_star = stars.get
+    owner.context.get_all_stars = lambda: list(stars.values())
     ev, req = await prepare(owner)
     store = DescriptionStore(tmp_path / "overrides.json")
     bridge = SchemaBridge(store)

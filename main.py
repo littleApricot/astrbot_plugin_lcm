@@ -748,6 +748,7 @@ class LCM(Star):
                                 prompt=source_notice,
                                 contexts=source,
                                 system_prompt=prompt,
+                                func_tool=None,
                             ),
                             timeout=max(
                                 10,

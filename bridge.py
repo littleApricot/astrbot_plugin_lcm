@@ -12,7 +12,6 @@ from astrbot.core.agent.tool import ToolSet
 
 from .image_context import ImageContext
 from .model_time import model_times
-from .tool_instructions import tool_view
 
 
 def plain(value):
@@ -124,8 +123,8 @@ class ProviderView:
 
             rules = self._owner.context_rules()
             available = kwargs.get("func_tool")
-            instructions, call_tools = tool_view(
-                available, self._state.get("tool_catalog", available)
+            call_tools, blocks = rules.provider_tools(
+                event, available, self._state.get("tool_catalog", available)
             )
             kwargs = {**kwargs, "func_tool": call_tools}
             if values and plain(values[0]).get("role") == "system":
@@ -140,7 +139,7 @@ class ProviderView:
                         if isinstance(part, dict)
                     )
                 )
-                value["content"] = rules.system(event, text, instructions)
+                value["content"] = rules.system(event, text, blocks)
                 values[0] = (
                     value
                     if isinstance(values[0], dict)
@@ -150,7 +149,7 @@ class ProviderView:
                 value = {
                     "role": "system",
                     "content": rules.system(
-                        event, kwargs.get("system_prompt", ""), instructions
+                        event, kwargs.get("system_prompt", ""), blocks
                     ),
                 }
                 values.insert(
@@ -162,7 +161,7 @@ class ProviderView:
                 kwargs = {**kwargs, "system_prompt": ""}
             # Detached input only: this message never enters runner history or
             # native persistence. The request snapshot still records it.
-            temporary = {"role": "user", "content": rules.temporary(event)}
+            temporary = {"role": "user", "content": rules.temporary(event, blocks)}
             values.append(
                 temporary
                 if not values or isinstance(values[0], dict)

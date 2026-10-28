@@ -58,6 +58,7 @@ class ContextRules:
                         "astrbot_plugin_self_prompt",
                         "astrbot_plugin_meme_library",
                         "astrbot_plugin_silence",
+                        "astrbot_plugin_tool_prompts",
                     )
                 ]
         declarations, seen = [], set()
@@ -89,7 +90,11 @@ class ContextRules:
         return declarations
 
     def history_entries(self, messages):
-        entries = [(index, native(message)) for index, message in enumerate(messages)]
+        entries = [
+            (index, native(message))
+            for index, message in enumerate(messages)
+            if native(message).get("role") not in {"system", "developer"}
+        ]
         for declaration in self.declarations():
             project = declaration.get("history_projector")
             if not callable(project):
@@ -104,6 +109,40 @@ class ContextRules:
                 updated.append((entries[index][0], native(message)))
             entries = updated
         return entries
+
+    def prompt_policy(self):
+        lookup = getattr(self.owner.context, "get_registered_star", None)
+        star = lookup("astrbot_plugin_tool_prompts") if callable(lookup) else None
+        plugin = getattr(star, "star_cls", None)
+        method = getattr(plugin, "model_context_policy", None)
+        if (
+            callable(method)
+            and getattr(star, "activated", True)
+            and getattr(plugin, "config", {}).get("enabled", True)
+        ):
+            return method()
+        return None
+
+    def prompt_records(self, event, position, additional=()):
+        policy = self.prompt_policy()
+        if policy:
+            return policy.records(event, self.declarations(), position, additional)
+        # Older producers and a disabled manager retain their declared fallback.
+        records = [
+            (block["owner"], block["text"])
+            for block in additional
+            if block["kind"] == "runtime" and position == "temporary"
+        ]
+        for declaration in self.declarations():
+            value = declaration.get(position, "")
+            value = value(event) if callable(value) else value
+            if value and value.strip():
+                records.append((declaration["owner"], value))
+        return records
+
+    def provider_tools(self, event, available, catalog):
+        policy = self.prompt_policy()
+        return policy.tools(event, available, catalog) if policy else (available, [])
 
     def project_history(self, messages):
         return [message for _, message in self.history_entries(messages)]
@@ -146,7 +185,7 @@ class ContextRules:
                 tool for tool in req.func_tool.tools if tool.name not in BLOCKED_TOOLS
             ]
 
-    def system(self, event, raw, tool_instructions=""):
+    def system(self, event, raw, blocks=()):
         previous = event.get_extra("lcm_rendered_system", "")
         base = event.get_extra("lcm_system_base", "")
         if previous and previous in raw:
@@ -167,13 +206,7 @@ class ContextRules:
         records = []
         if raw:
             records.append(("astrbot.core/未声明来源", raw))
-        if tool_instructions:
-            records.append(("astrbot.tools", tool_instructions))
-        for declaration in self.declarations():
-            value = declaration.get("system", "")
-            value = value(event) if callable(value) else value
-            if value and value.strip():
-                records.append((declaration["owner"], value))
+        records.extend(self.prompt_records(event, "system", blocks))
         rendered = "\n\n".join(wrap(owner, text) for owner, text in records)
         event.set_extra("lcm_rendered_system", rendered)
         event.set_extra(
@@ -182,19 +215,26 @@ class ContextRules:
         )
         return rendered
 
-    def temporary(self, event):
+    def temporary(self, event, blocks=()):
         config = getattr(self.owner.context, "get_config", lambda **kwargs: {})(
             umo=event.unified_msg_origin
         )
         zone = ZoneInfo(config.get("timezone", "Asia/Shanghai") or "Asia/Shanghai")
         current = datetime.now(zone)
         runtime = runtime_time(current)
-        records = [("astrbot.runtime", runtime)]
-        for declaration in self.declarations():
-            value = declaration.get("temporary", "")
-            value = value(event) if callable(value) else value
-            if value and value.strip():
-                records.append((declaration["owner"], value))
+        records = self.prompt_records(
+            event,
+            "temporary",
+            [
+                {
+                    "owner": "astrbot.runtime",
+                    "key": "clock",
+                    "kind": "runtime",
+                    "text": runtime,
+                },
+                *blocks,
+            ],
+        )
         event.set_extra(
             "lcm_temporary_sources",
             [{"owner": owner, "characters": len(text)} for owner, text in records],

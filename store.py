@@ -1275,7 +1275,7 @@ class Store:
                         if run and (run[0] == "running" or not run[1]):
                             break
                     # Retain boundary units; a single giant old unit may advance whole.
-                    if candidates and size + n["tokens"] > budget:
+                    if size > 0 and size + n["tokens"] > budget:
                         break
                     candidates.append(n)
                     size += n["tokens"]
@@ -1326,7 +1326,7 @@ class Store:
                         if not running:
                             candidates = proposed
                 size = sum(n["tokens"] for n in candidates)
-                if not candidates or total - size < budget:
+                if not candidates or size <= 0 or total - size < budget:
                     continue
                 sources = [n["id"] for n in candidates]
                 # Read back inside the transaction to reject a simultaneous reserve.

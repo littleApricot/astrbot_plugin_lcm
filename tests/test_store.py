@@ -42,6 +42,22 @@ def test_boundary_35_plus_47_and_originals_survive(store):
     assert len(store.expand(scope, parent["id"], limit=10)["units"]) == 2
 
 
+def test_hidden_prefix_advances_with_first_effective_unit(store):
+    scope = store.scope("g", "c")
+    hidden = [add(store, scope, 1, "injected definition") for _ in range(2)]
+    old = add(store, scope, 50, "old real chat")
+    recent = add(store, scope, 50, "recent real chat")
+    nodes = store.view(scope)["nodes"]
+    for node in nodes:
+        if node["id"] in hidden:
+            node["tokens"] = 0
+    ident = store.plan_job(scope, 40, nodes=nodes)
+    job = store.next_job()
+    assert ident and job["sources"] == hidden + [old]
+    assert recent not in job["sources"]
+    assert sum(node["tokens"] for node in nodes if node["id"] in job["sources"]) > 0
+
+
 def test_whole_round_over_budget_and_interleaved_messages(store):
     scope = store.scope("g", "c")
     first = add(store, scope, 20)
